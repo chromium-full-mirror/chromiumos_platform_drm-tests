@@ -27,6 +27,7 @@ all: \
 	CC_BINARY(plane_test) \
 	CC_BINARY(stripe) \
 	CC_BINARY(swrast_test) \
+	CC_BINARY(synctest) \
 	CC_BINARY(vgem_test)
 
 ifeq ($(USE_VULKAN),1)
@@ -60,6 +61,9 @@ CC_BINARY(plane_test): LDLIBS += -lm $(DRM_LIBS)
 
 CC_BINARY(mapped_texture_test): mapped_texture_test.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
 CC_BINARY(mapped_texture_test): LDLIBS += -lGLESv2
+
+CC_BINARY(synctest): synctest.o
+CC_BINARY(synctest): LDLIBS += -lsync
 
 ifeq ($(USE_VULKAN),1)
 CC_BINARY(vk_glow): vk_glow.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
