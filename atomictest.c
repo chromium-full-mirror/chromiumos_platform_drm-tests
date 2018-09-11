@@ -494,6 +494,7 @@ static int disable_plane(struct atomictest_context *ctx, struct atomictest_plane
 	plane->src_w.value = 0;
 	plane->src_h.value = 0;
 	plane->crtc_id.value = 0;
+	plane->in_fence_fd.value = -1;
 
 	if (plane->rotation.pid)
 		plane->rotation.value = DRM_ROTATE_0;
