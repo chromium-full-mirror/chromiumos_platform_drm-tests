@@ -144,6 +144,7 @@ struct atomictest_crtc {
 	struct atomictest_property ctm;
 	struct atomictest_property gamma_lut;
 	struct atomictest_property gamma_lut_size;
+	struct atomictest_property background_color;
 };
 
 struct atomictest_mode {
@@ -330,6 +331,8 @@ static int get_crtc_props(int fd, struct atomictest_crtc *crtc, drmModeObjectPro
 	get_prop(fd, props, "CTM", &crtc->ctm);
 	get_prop(fd, props, "GAMMA_LUT", &crtc->gamma_lut);
 	get_prop(fd, props, "GAMMA_LUT_SIZE", &crtc->gamma_lut_size);
+	get_prop(fd, props, "BACKGROUND_COLOR", &crtc->background_color);
+
 	return 0;
 }
 
@@ -378,6 +381,11 @@ int set_crtc_props(struct atomictest_crtc *crtc, drmModeAtomicReqPtr pset)
 	if (crtc->gamma_lut.pid)
 		CHECK_RESULT(
 		    drmModeAtomicAddProperty(pset, id, crtc->gamma_lut.pid, crtc->gamma_lut.value));
+	if (crtc->background_color.pid) {
+		CHECK_RESULT(drmModeAtomicAddProperty(pset, id, crtc->background_color.pid,
+						      crtc->background_color.value));
+	}
+
 	return 0;
 }
 
@@ -719,6 +727,8 @@ static int disable_crtc(struct atomictest_context *ctx, struct atomictest_crtc *
 		crtc->ctm.value = 0;
 	if (crtc->gamma_lut.pid)
 		crtc->gamma_lut.value = 0;
+	if (crtc->background_color.pid)
+		crtc->background_color.value = 0;
 
 	set_crtc_props(crtc, ctx->pset);
 	int ret = drmModeAtomicCommit(ctx->fd, ctx->pset, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
@@ -1459,6 +1469,39 @@ static int test_crtc_gamma(struct atomictest_context *ctx, struct atomictest_crt
 	return ret;
 }
 
+static inline uint64_t pack_rgba_64(uint64_t red, uint64_t green, uint64_t blue, uint64_t alpha)
+{
+	return alpha << 48 | blue  << 32 | green << 16 | red;
+}
+
+static int test_crtc_background_color(struct atomictest_context *ctx, struct atomictest_crtc *crtc)
+{
+	int ret = 0;
+
+	if (!crtc->background_color.pid)
+		return 0;
+
+	struct crtc_background_color {
+		const char *name;
+		uint64_t rgba_value;
+	};
+
+	const struct crtc_background_color colors[] = {
+		{"black",  pack_rgba_64(     0,      0,      0, 0xffff)},
+		{"red",    pack_rgba_64(0xffff,      0,      0, 0xffff)},
+		{"green",  pack_rgba_64(     0, 0xffff,      0, 0xffff)},
+		{"blue",   pack_rgba_64(     0,      0, 0xffff, 0xffff)},
+	};
+
+	for (int i = 0; i < BS_ARRAY_LEN(colors); i++) {
+		crtc->background_color.value = colors[i].rgba_value;
+		set_crtc_props(crtc, ctx->pset);
+		ret |= test_and_commit(ctx, 1e6);
+	}
+
+	return ret;
+}
+
 static const struct atomictest_testcase cases[] = {
 	{ "disable_primary", test_disable_primary },
 	{ "rgba_primary", test_rgba_primary },
@@ -1477,6 +1520,7 @@ static const struct atomictest_testcase cases[] = {
 	{ "plane_ctm", test_plane_ctm },
 	{ "crtc_ctm", test_crtc_ctm },
 	{ "crtc_gamma", test_crtc_gamma },
+	{ "crtc_background_color", test_crtc_background_color },
 };
 
 static int run_testcase(struct atomictest_context *ctx, struct atomictest_crtc *crtc,
