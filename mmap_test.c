@@ -26,26 +26,61 @@ struct context {
 	int vgem_device_fd;
 };
 
-static void disable_psr()
+struct disabled_features {
+	char psr_prev_val[1];
+};
+
+const char psr_path[] = "/sys/module/i915/parameters/enable_psr";
+
+static void disable_psr(struct disabled_features *dis_feat)
 {
-	const char psr_path[] = "/sys/module/i915/parameters/enable_psr";
-	int psr_fd = open(psr_path, O_WRONLY);
+	int psr_fd = open(psr_path, O_RDWR);
 
 	if (psr_fd < 0)
 		return;
 
-	if (write(psr_fd, "0", 1) == -1) {
-		bs_debug_error("failed to disable psr");
+	if (read(psr_fd, dis_feat->psr_prev_val, 1) == -1) {
+		bs_debug_error("failed to read psr value");
 	} else {
-		printf("disabled psr");
+		printf("previous enable_psr value: %c\n", dis_feat->psr_prev_val[0]);
+	}
+	if (strncmp(dis_feat->psr_prev_val, "1", 1) == 0) {
+		if (write(psr_fd, "0", 1) == -1) {
+			bs_debug_error("failed to disable psr");
+		} else {
+			printf("disabled psr\n");
+		}
 	}
 
 	close(psr_fd);
 }
 
-static void do_fixes()
+static void restore_psr(struct disabled_features *dis_feat)
 {
-	disable_psr();
+	if (strncmp(dis_feat->psr_prev_val, "1", 1) == 0) {
+		int psr_fd = open(psr_path, O_WRONLY);
+
+		if (psr_fd < 0)
+			return;
+
+		if (write(psr_fd, "1", 1) == -1) {
+			bs_debug_error("failed to re-enable psr");
+		} else {
+			printf("re-enabled psr\n");
+		}
+
+		close(psr_fd);
+	}
+}
+
+static void do_fixes(struct disabled_features *dis_feat)
+{
+	disable_psr(dis_feat);
+}
+
+static void restore_features(struct disabled_features *dis_feat)
+{
+	restore_psr(dis_feat);
 }
 
 #define STEP_SKIP 0
@@ -192,8 +227,9 @@ static void print_help(const char *argv0)
 int main(int argc, char **argv)
 {
 	struct context ctx = { 0 };
+	struct disabled_features dis_feat = { 0 };
 
-	do_fixes();
+	do_fixes(&dis_feat);
 
 	ctx.display_fd = bs_drm_open_main_display();
 	if (ctx.display_fd < 0) {
@@ -289,6 +325,8 @@ int main(int argc, char **argv)
 	}
 
 	draw(&ctx);
+
+	restore_features(&dis_feat);
 
 	return 0;
 }
