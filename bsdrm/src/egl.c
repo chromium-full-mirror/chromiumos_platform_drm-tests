@@ -187,7 +187,7 @@ EGLImageKHR bs_egl_image_create_gbm(struct bs_egl *self, struct gbm_bo *bo)
 	assert(bo);
 
 	int fds[GBM_MAX_PLANES];
-	for (size_t plane = 0; plane < gbm_bo_get_num_planes(bo); plane++) {
+	for (size_t plane = 0; plane < gbm_bo_get_plane_count(bo); plane++) {
 		fds[plane] = gbm_bo_get_plane_fd(bo, plane);
 		if (fds[plane] < 0) {
 			bs_debug_error("failed to get fb for bo: %d", fds[plane]);
@@ -207,15 +207,15 @@ EGLImageKHR bs_egl_image_create_gbm(struct bs_egl *self, struct gbm_bo *bo)
 	};
 
 	size_t attrs_index = 6;
-	for (size_t plane = 0; plane < gbm_bo_get_num_planes(bo); plane++) {
+	for (size_t plane = 0; plane < gbm_bo_get_plane_count(bo); plane++) {
 		khr_image_attrs[attrs_index++] = EGL_DMA_BUF_PLANE0_FD_EXT + plane * 3;
 		khr_image_attrs[attrs_index++] = fds[plane];
 		khr_image_attrs[attrs_index++] = EGL_DMA_BUF_PLANE0_OFFSET_EXT + plane * 3;
-		khr_image_attrs[attrs_index++] = gbm_bo_get_plane_offset(bo, plane);
+		khr_image_attrs[attrs_index++] = gbm_bo_get_offset(bo, plane);
 		khr_image_attrs[attrs_index++] = EGL_DMA_BUF_PLANE0_PITCH_EXT + plane * 3;
-		khr_image_attrs[attrs_index++] = gbm_bo_get_plane_stride(bo, plane);
+		khr_image_attrs[attrs_index++] = gbm_bo_get_stride_for_plane(bo, plane);
 		if (self->use_dma_buf_import_modifiers) {
-			const uint64_t modifier = gbm_bo_get_format_modifier(bo);
+			const uint64_t modifier = gbm_bo_get_modifier(bo);
 			khr_image_attrs[attrs_index++] =
 			    EGL_DMA_BUF_PLANE0_MODIFIER_LO_EXT + plane * 2;
 			khr_image_attrs[attrs_index++] = modifier & 0xfffffffful;
@@ -245,7 +245,7 @@ EGLImageKHR bs_egl_image_create_gbm(struct bs_egl *self, struct gbm_bo *bo)
 		return EGL_NO_IMAGE_KHR;
 	}
 
-	for (size_t plane = 0; plane < gbm_bo_get_num_planes(bo); plane++) {
+	for (size_t plane = 0; plane < gbm_bo_get_plane_count(bo); plane++) {
 		close(fds[plane]);
 	}
 

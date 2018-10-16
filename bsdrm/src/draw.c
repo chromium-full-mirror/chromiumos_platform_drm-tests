@@ -180,7 +180,7 @@ static void unmmap_planes(struct bs_mapper *mapper, struct gbm_bo *bo, size_t nu
 static size_t mmap_planes(struct bs_mapper *mapper, struct gbm_bo *bo,
 			  struct draw_plane planes[GBM_MAX_PLANES])
 {
-	size_t num_planes = gbm_bo_get_num_planes(bo);
+	size_t num_planes = gbm_bo_get_plane_count(bo);
 	for (size_t plane_index = 0; plane_index < num_planes; plane_index++) {
 		struct draw_plane *plane = &planes[plane_index];
 		plane->ptr =

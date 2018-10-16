@@ -40,11 +40,11 @@ static void *dma_buf_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t pla
 			 struct bs_map_info *info, uint32_t *stride)
 {
 	int drm_prime_fd = gbm_bo_get_plane_fd(bo, plane);
-	uint32_t handle = gbm_bo_get_plane_handle(bo, plane).u32;
+	uint32_t handle = gbm_bo_get_handle_for_plane(bo, plane).u32;
 	size_t length = 0;
 
 	for (size_t p = 0; p <= plane; p++) {
-		if (gbm_bo_get_plane_handle(bo, p).u32 == handle)
+		if (gbm_bo_get_handle_for_plane(bo, p).u32 == handle)
 			length += gbm_bo_get_plane_size(bo, p);
 	}
 
@@ -53,7 +53,7 @@ static void *dma_buf_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t pla
 		bs_debug_error("dma-buf mmap returned MAP_FAILED: %d", errno);
 		ptr = MAP_FAILED;
 	} else {
-		ptr += gbm_bo_get_plane_offset(bo, plane);
+		ptr += gbm_bo_get_offset(bo, plane);
 	}
 
 	struct dma_buf_sync sync_start = { 0 };
@@ -61,7 +61,7 @@ static void *dma_buf_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t pla
 	int ret = HANDLE_EINTR(ioctl(drm_prime_fd, DMA_BUF_IOCTL_SYNC, &sync_start));
 	if (ret)
 		bs_debug_error("DMA_BUF_IOCTL_SYNC failed");
-	*stride = gbm_bo_get_plane_stride(bo, plane);
+	*stride = gbm_bo_get_stride_for_plane(bo, plane);
 
 	close(drm_prime_fd);
 	return ptr;
@@ -78,7 +78,7 @@ static void dma_buf_unmap(struct gbm_bo *bo, struct bs_map_info *info)
 		bs_debug_error("DMA_BUF_IOCTL_SYNC failed");
 
 	void *addr = info->ptr;
-	addr -= gbm_bo_get_plane_offset(bo, info->plane_index);
+	addr -= gbm_bo_get_offset(bo, info->plane_index);
 	ret = munmap(addr, gbm_bo_get_plane_size(bo, info->plane_index));
 	if (ret)
 		bs_debug_error("dma-buf unmap failed.");
@@ -138,7 +138,7 @@ static void *dumb_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 		bs_debug_error("mmap returned MAP_FAILED: %d", errno);
 		return MAP_FAILED;
 	}
-	*stride = gbm_bo_get_plane_stride(bo, plane);
+	*stride = gbm_bo_get_stride_for_plane(bo, plane);
 
 	close(prime_fd);
 	return ptr;

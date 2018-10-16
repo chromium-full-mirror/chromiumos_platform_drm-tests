@@ -53,7 +53,7 @@ void bs_drm_fb_builder_gbm_bo(struct bs_drm_fb_builder *self, struct gbm_bo *bo)
 	self->width = gbm_bo_get_width(bo);
 	self->height = gbm_bo_get_height(bo);
 	self->format = gbm_bo_get_format(bo);
-	self->plane_count = gbm_bo_get_num_planes(bo);
+	self->plane_count = gbm_bo_get_plane_count(bo);
 	if (self->plane_count > MAX_PLANE_COUNT) {
 		bs_debug_print("WARNING", __func__, __FILE__, __LINE__,
 			       "only using first %d planes out of buffer object's %zu planes",
@@ -62,9 +62,9 @@ void bs_drm_fb_builder_gbm_bo(struct bs_drm_fb_builder *self, struct gbm_bo *bo)
 	}
 
 	for (size_t plane_index = 0; plane_index < self->plane_count; plane_index++) {
-		self->handles[plane_index] = gbm_bo_get_plane_handle(bo, plane_index).u32;
-		self->strides[plane_index] = gbm_bo_get_plane_stride(bo, plane_index);
-		self->offsets[plane_index] = gbm_bo_get_plane_offset(bo, plane_index);
+		self->handles[plane_index] = gbm_bo_get_handle_for_plane(bo, plane_index).u32;
+		self->strides[plane_index] = gbm_bo_get_stride_for_plane(bo, plane_index);
+		self->offsets[plane_index] = gbm_bo_get_offset(bo, plane_index);
 	}
 }
 
