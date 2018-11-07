@@ -84,12 +84,13 @@ static uint32_t find_format(char *fourcc)
 
 static const struct option longopts[] = {
 	{ "format", required_argument, NULL, 'f' },
+	{ "modifier", required_argument, NULL, 'm' },
 	{ "test-page-flip-format-change", required_argument, NULL, 'p' },
 	{ "help", no_argument, NULL, 'h' },
 	{ 0, 0, 0, 0 },
 };
 
-static void print_help(const char *argv0)
+static void print_help(const char *argv0, int fd)
 {
 	char allowed_formats_string[allowed_formats_length * 6];
 	int i;
@@ -102,11 +103,14 @@ static void print_help(const char *argv0)
 
 	// clang-format off
 	printf("usage: %s [OPTIONS] [drm_device_path]\n", argv0);
-	printf("  -f, --format <format>			    defines the fb format.\n");
-	printf("  -p, --test-page-flip-format-change <format>	test page flips alternating formats.\n");
-	printf("  -h, --help		    show help\n");
+	printf("  -f, --format <format>                        defines the fb format.\n");
+	printf("  -m, --modifier <modifier>                    pass modifiers.\n");
+	printf("  -p, --test-page-flip-format-change <format>  test page flips alternating formats.\n");
+	printf("  -h, --help                                   show help\n");
 	printf("\n");
-        printf(" <format> must be one of [ %s ].\n", allowed_formats_string);
+	printf(" <format> must be one of [ %s ].\n", allowed_formats_string);
+	printf(" <modifier> must be one of ");
+	bs_print_supported_modifiers(fd);
 	printf("\n");
 	printf("\n");
 	// clang-format on
@@ -118,9 +122,10 @@ int main(int argc, char **argv)
 	bool help_flag = false;
 	uint32_t format = GBM_FORMAT_XRGB8888;
 	uint32_t test_page_flip_format_change = 0;
+	uint64_t modifier = DRM_FORMAT_MOD_INVALID;
 
 	int c = -1;
-	while ((c = getopt_long(argc, argv, "hp:f:", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "m:hp:f:", longopts, NULL)) != -1) {
 		switch (c) {
 			case 'p':
 				test_page_flip_format_change = find_format(optarg);
@@ -129,17 +134,22 @@ int main(int argc, char **argv)
 				break;
 			case 'f':
 				format = find_format(optarg);
-				if (!format)
+				if (!format) {
+					bs_debug_error("unsupported format: %s", optarg);
 					help_flag = true;
+				}
+				break;
+			case 'm':
+				modifier = bs_string_to_modifier(optarg);
+				if (modifier == -1) {
+					bs_debug_error("unsupported modifier: %s", optarg);
+					help_flag = true;
+				}
 				break;
 			case 'h':
 				help_flag = true;
 				break;
 		}
-	}
-
-	if (help_flag) {
-		print_help(*argv);
 	}
 
 	if (optind < argc) {
@@ -154,6 +164,12 @@ int main(int argc, char **argv)
 			bs_debug_error("failed to open card for display");
 			return 1;
 		}
+	}
+
+	if (help_flag) {
+		print_help(*argv, fd);
+		close(fd);
+		return 1;
 	}
 
 	struct gbm_device *gbm = gbm_create_device(fd);
@@ -187,8 +203,14 @@ int main(int argc, char **argv)
 			format = test_page_flip_format_change;
 		}
 
-		bos[fb_index] = gbm_bo_create(gbm, mode->hdisplay, mode->vdisplay, format,
-					      GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+		if (modifier != DRM_FORMAT_MOD_INVALID) {
+			bos[fb_index] = gbm_bo_create_with_modifiers(
+			    gbm, mode->hdisplay, mode->vdisplay, format, &modifier, 1);
+		} else {
+			bos[fb_index] = gbm_bo_create(gbm, mode->hdisplay, mode->vdisplay, format,
+						      GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+		}
+
 		if (bos[fb_index] == NULL) {
 			bs_debug_error("failed to allocate framebuffer");
 			return 1;

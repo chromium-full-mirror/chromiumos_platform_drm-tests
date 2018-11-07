@@ -17,12 +17,14 @@ struct bs_drm_fb_builder {
 	uint32_t handles[MAX_PLANE_COUNT];
 	uint32_t strides[MAX_PLANE_COUNT];
 	uint32_t offsets[MAX_PLANE_COUNT];
+	uint64_t modifier;
 };
 
 void bs_drm_fb_builder_init(struct bs_drm_fb_builder *self)
 {
 	assert(self);
 	self->fd = -1;
+	self->modifier = DRM_FORMAT_MOD_INVALID;
 }
 
 struct bs_drm_fb_builder *bs_drm_fb_builder_new()
@@ -54,6 +56,7 @@ void bs_drm_fb_builder_gbm_bo(struct bs_drm_fb_builder *self, struct gbm_bo *bo)
 	self->height = gbm_bo_get_height(bo);
 	self->format = gbm_bo_get_format(bo);
 	self->plane_count = gbm_bo_get_plane_count(bo);
+	self->modifier = gbm_bo_get_format_modifier(bo);
 	if (self->plane_count > MAX_PLANE_COUNT) {
 		bs_debug_print("WARNING", __func__, __FILE__, __LINE__,
 			       "only using first %d planes out of buffer object's %zu planes",
@@ -107,12 +110,26 @@ uint32_t bs_drm_fb_builder_create_fb(struct bs_drm_fb_builder *self)
 	}
 
 	uint32_t fb_id;
+	int ret = 0;
 
-	int ret = drmModeAddFB2(self->fd, self->width, self->height, self->format, self->handles,
-				self->strides, self->offsets, &fb_id, 0);
+	if (self->modifier != DRM_FORMAT_MOD_INVALID &&
+	    bs_are_modifier_supported(self->fd, DRM_PLANE_TYPE_PRIMARY)) {
+		uint64_t modifiers[4] = { DRM_FORMAT_MOD_NONE, DRM_FORMAT_MOD_NONE,
+					  DRM_FORMAT_MOD_NONE, DRM_FORMAT_MOD_NONE };
+		for (int i = 0; i < self->plane_count; i++)
+			modifiers[i] = self->modifier;
+		ret = drmModeAddFB2WithModifiers(self->fd, self->width, self->height, self->format,
+						 self->handles, self->strides, self->offsets,
+						 modifiers, &fb_id, DRM_MODE_FB_MODIFIERS);
+	} else {
+		ret = drmModeAddFB2(self->fd, self->width, self->height, self->format,
+				    self->handles, self->strides, self->offsets, &fb_id, 0);
+	}
 
 	if (ret) {
-		bs_debug_error("failed to create drm fb: drmModeAddFB2 returned %d", ret);
+		bs_debug_error("failed to create drm fb: %s returned %d",
+			       self->modifier ? "drmModeAddFB2WithModifiers" : "drmModeAddFB2",
+			       ret);
 		return 0;
 	}
 

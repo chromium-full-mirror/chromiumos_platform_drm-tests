@@ -16,6 +16,7 @@ CC_STATIC_LIBRARY(libbsdrm.pic.a): \
   bsdrm/src/drm_pipe.o \
   bsdrm/src/egl.o \
   bsdrm/src/gl.o \
+  bsdrm/src/kms.o \
   bsdrm/src/mmap.o \
   bsdrm/src/open.o \
   bsdrm/src/pipe.o

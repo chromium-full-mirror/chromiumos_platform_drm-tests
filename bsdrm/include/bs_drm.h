@@ -231,4 +231,9 @@ uint32_t bs_get_pixel_format(const struct bs_draw_format *format);
 const char *bs_get_format_name(const struct bs_draw_format *format);
 bool bs_parse_draw_format(const char *str, const struct bs_draw_format **format);
 
+// kms.c
+void bs_print_supported_modifiers(int fd);
+bool bs_are_modifier_supported(int fd, int drm_plane_type);
+uint64_t bs_string_to_modifier(char *modifier_str);
+
 #endif
