@@ -56,7 +56,7 @@ void bs_drm_fb_builder_gbm_bo(struct bs_drm_fb_builder *self, struct gbm_bo *bo)
 	self->height = gbm_bo_get_height(bo);
 	self->format = gbm_bo_get_format(bo);
 	self->plane_count = gbm_bo_get_plane_count(bo);
-	self->modifier = gbm_bo_get_format_modifier(bo);
+	self->modifier = gbm_bo_get_modifier(bo);
 	if (self->plane_count > MAX_PLANE_COUNT) {
 		bs_debug_print("WARNING", __func__, __FILE__, __LINE__,
 			       "only using first %d planes out of buffer object's %zu planes",
