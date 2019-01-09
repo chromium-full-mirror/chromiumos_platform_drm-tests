@@ -37,6 +37,8 @@
 		}                                                     \
 	} while (0)
 
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
 #define CURSOR_SIZE 64
 
 // TODO(dcastagna): Remove these declarations once they're exported in a libsync header.
@@ -160,6 +162,7 @@ struct atomictest_context {
 	struct atomictest_crtc *crtcs;
 	struct atomictest_mode *modes;
 	drmModeAtomicReqPtr pset;
+	drmModeResPtr res;
 	drmEventContext drm_event_ctx;
 
 	struct bs_mapper *mapper;
@@ -773,6 +776,7 @@ static void free_context(struct atomictest_context *ctx)
 	}
 
 	drmModeAtomicFree(ctx->pset);
+	drmModeFreeResources(ctx->res);
 	free(ctx->modes);
 	free(ctx->crtcs);
 	free(ctx->connectors);
@@ -782,7 +786,7 @@ static void free_context(struct atomictest_context *ctx)
 
 static struct atomictest_context *query_kms(int fd)
 {
-	drmModeRes *res = drmModeGetResources(fd);
+	drmModeResPtr res = drmModeGetResources(fd);
 	if (res == NULL) {
 		bs_debug_error("failed to get drm resources");
 		return false;
@@ -805,6 +809,7 @@ static struct atomictest_context *query_kms(int fd)
 	}
 
 	ctx->fd = fd;
+	ctx->res = res;
 	drmModeObjectPropertiesPtr props = NULL;
 
 	for (uint32_t conn_index = 0; conn_index < res->count_connectors; conn_index++) {
@@ -898,7 +903,6 @@ static struct atomictest_context *query_kms(int fd)
 	}
 
 	drmModeFreePlaneResources(plane_res);
-	drmModeFreeResources(res);
 	return ctx;
 }
 
@@ -913,6 +917,8 @@ static int test_multiple_planes(struct atomictest_context *ctx, struct atomictes
 			overlay = get_plane(crtc, j, DRM_PLANE_TYPE_OVERLAY);
 			x = crtc->width >> (j + 2);
 			y = crtc->height >> (j + 2);
+			x = MAX(x, ctx->res->min_width);
+			y = MAX(y, ctx->res->min_height);
 			// drmModeAddFB2 requires the height and width are even for sub-sampled YUV
 			// formats.
 			x = BS_ALIGN(x, 2);
@@ -1222,6 +1228,8 @@ static int test_disable_primary(struct atomictest_context *ctx, struct atomictes
 			overlay = get_plane(crtc, j, DRM_PLANE_TYPE_OVERLAY);
 			uint32_t x = crtc->width >> (j + 2);
 			uint32_t y = crtc->height >> (j + 2);
+			x = MAX(x, ctx->res->min_width);
+			y = MAX(y, ctx->res->min_height);
 			CHECK_RESULT(
 			    init_plane_any_format(ctx, overlay, x, y, x, y, crtc->crtc_id, false));
 			CHECK_RESULT(draw_to_plane(ctx->mapper, overlay, DRAW_LINES));
