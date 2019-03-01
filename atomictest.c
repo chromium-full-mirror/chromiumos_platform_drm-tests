@@ -117,6 +117,7 @@ struct atomictest_plane {
 	struct atomictest_property in_fence_fd;
 	struct atomictest_property rotation;
 	struct atomictest_property ctm;
+	struct atomictest_property alpha;
 };
 
 struct atomictest_connector {
@@ -358,6 +359,7 @@ static int get_plane_props(int fd, struct atomictest_plane *plane, drmModeObject
 	 */
 	get_prop(fd, props, "rotation", &plane->rotation);
 	get_prop(fd, props, "PLANE_CTM", &plane->ctm);
+	get_prop(fd, props, "alpha", &plane->alpha);
 	return 0;
 }
 
@@ -409,6 +411,10 @@ int set_plane_props(struct atomictest_plane *plane, drmModeAtomicReqPtr pset)
 		    drmModeAtomicAddProperty(pset, id, plane->rotation.pid, plane->rotation.value));
 	if (plane->ctm.pid)
 		CHECK_RESULT(drmModeAtomicAddProperty(pset, id, plane->ctm.pid, plane->ctm.value));
+	if (plane->alpha.pid) {
+		CHECK_RESULT(
+		    drmModeAtomicAddProperty(pset, id, plane->alpha.pid, plane->alpha.value));
+	}
 
 	return 0;
 }
@@ -1045,6 +1051,56 @@ static int test_orientation(struct atomictest_context *ctx, struct atomictest_cr
 	return ret;
 }
 
+static int test_plane_alpha(struct atomictest_context *ctx, struct atomictest_crtc *crtc)
+{
+	int ret = 0;
+	struct atomictest_plane *primary, *overlay;
+	int offset_x = crtc->width / 5, offset_y = crtc->height / 5;
+
+	for (uint32_t i = 0; i < crtc->num_primary; i++) {
+		primary = get_plane(crtc, i, DRM_PLANE_TYPE_PRIMARY);
+		if (!primary->alpha.pid)
+			return 0;
+
+		CHECK_RESULT(init_plane_any_format(
+			ctx, primary, 0, 0, crtc->width, crtc->height,
+						crtc->crtc_id, false));
+		CHECK_RESULT(draw_to_plane(ctx->mapper, primary, DRAW_ELLIPSE));
+		primary->alpha.value = 0xffff;
+		set_plane_props(primary, ctx->pset);
+		ret |= test_and_commit(ctx, 1e6 / 2);
+
+		for (uint32_t j = 0; j < crtc->num_overlay; j++) {
+			overlay = get_plane(crtc, j, DRM_PLANE_TYPE_OVERLAY);
+			if (!overlay->alpha.pid)
+				return 0;
+
+			CHECK_RESULT(init_plane_any_format(
+				ctx, overlay, offset_x, offset_y,
+				crtc->width - offset_x * 2, crtc->height - offset_y * 2,
+						crtc->crtc_id, false));
+			CHECK_RESULT(draw_to_plane(ctx->mapper, overlay, DRAW_STRIPE));
+			ret |= test_and_commit(ctx, 1e6 / 2);
+
+			for (uint32_t a = 0xffff; a > 0; a = a >> 1) {
+				overlay->alpha.value = a;
+				set_plane_props(overlay, ctx->pset);
+				ret |= test_and_commit(ctx, 1e6 / 5);
+			}
+			overlay->alpha.value = 0xffff;
+			set_plane_props(overlay, ctx->pset);
+		}
+
+		for (uint32_t a = 0xffff; a > 0; a = a >> 1) {
+			primary->alpha.value = a;
+			set_plane_props(primary, ctx->pset);
+			ret |= test_and_commit(ctx, 1e6 / 5);
+		}
+	}
+
+	return ret;
+}
+
 static void *inc_timeline(void *user_data)
 {
 	int timeline_fd = (int)user_data;
@@ -1518,6 +1574,7 @@ static const struct atomictest_testcase cases[] = {
 	{ "out_fence", test_out_fence },
 	/* CTM stands for Color Transform Matrix. */
 	{ "plane_ctm", test_plane_ctm },
+	{ "plane_alpha", test_plane_alpha },
 	{ "crtc_ctm", test_crtc_ctm },
 	{ "crtc_gamma", test_crtc_gamma },
 	{ "crtc_background_color", test_crtc_background_color },
