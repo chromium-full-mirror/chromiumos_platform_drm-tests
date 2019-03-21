@@ -86,6 +86,7 @@ static const struct option longopts[] = {
 	{ "format", required_argument, NULL, 'f' },
 	{ "modifier", required_argument, NULL, 'm' },
 	{ "test-page-flip-format-change", required_argument, NULL, 'p' },
+	{ "banding", no_argument, NULL, 'b' },
 	{ "help", no_argument, NULL, 'h' },
 	{ 0, 0, 0, 0 },
 };
@@ -106,6 +107,7 @@ static void print_help(const char *argv0, int fd)
 	printf("  -f, --format <format>                        defines the fb format.\n");
 	printf("  -m, --modifier <modifier>                    pass modifiers.\n");
 	printf("  -p, --test-page-flip-format-change <format>  test page flips alternating formats.\n");
+	printf("  -b, --banding                                show a pattern that makes banding easy to spot if present.\n");
 	printf("  -h, --help                                   show help\n");
 	printf("\n");
 	printf(" <format> must be one of [ %s ].\n", allowed_formats_string);
@@ -123,9 +125,10 @@ int main(int argc, char **argv)
 	uint32_t format = GBM_FORMAT_XRGB8888;
 	uint32_t test_page_flip_format_change = 0;
 	uint64_t modifier = DRM_FORMAT_MOD_INVALID;
+	bool banding_pattern = false;
 
 	int c = -1;
-	while ((c = getopt_long(argc, argv, "m:hp:f:", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "m:hp:f:b", longopts, NULL)) != -1) {
 		switch (c) {
 			case 'p':
 				test_page_flip_format_change = find_format(optarg);
@@ -145,6 +148,9 @@ int main(int argc, char **argv)
 					bs_debug_error("unsupported modifier: %s", optarg);
 					help_flag = true;
 				}
+				break;
+			case 'b':
+				banding_pattern = true;
 				break;
 			case 'h':
 				help_flag = true;
@@ -249,21 +255,34 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	int fb_idx = 1;
-	for (int i = 0; i <= 500; i++) {
-		int waiting_for_flip = 1;
-		// clang-format off
-		GLfloat verts[] = {
+	// clang-format off
+	const GLfloat triangle_vertices[] = {
 			0.0f, -0.5f, 0.0f,
 			-0.5f, 0.5f, 0.0f,
 			0.5f, 0.5f, 0.0f
 		};
-		GLfloat colors[] = {
+	const GLfloat triangle_colors[] = {
 			1.0f, 0.0f, 0.0f, 1.0f,
 			0.0f, 1.0f, 0.0f, 1.0f,
 			0.0f, 0.0f, 1.0f, 1.0f
 		};
-		// clang-format on
+	const GLfloat square_vertices[] = {
+		-1.0f, -1.0f, 0.0f,
+		 1.0f, -1.0f, 0.0f,
+		-1.0f,  1.0f, 0.0f,
+		 1.0f,  1.0f, 0.0f,
+	};
+	const GLfloat square_colors[] = {
+		 0.05f, 0.05f, 0.05f, 1.0f,
+		 0.05f, 0.05f, 0.05f, 1.0f,
+		 0.45f, 0.45f, 0.45f, 1.0f,
+		 0.45f, 0.45f, 0.45f, 1.0f,
+	};
+	// clang-format on
+
+	int fb_idx = 1;
+	for (int i = 0; i <= 500; i++) {
+		int waiting_for_flip = 1;
 
 		glBindFramebuffer(GL_FRAMEBUFFER, bs_egl_fb_name(egl_fbs[fb_idx]));
 		glViewport(0, 0, (GLint)mode->hdisplay, (GLint)mode->vdisplay);
@@ -272,11 +291,16 @@ int main(int argc, char **argv)
 		glClear(GL_COLOR_BUFFER_BIT);
 
 		glUseProgram(program);
-		glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, verts);
-		glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 0, colors);
+		if (banding_pattern) {
+			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, square_vertices);
+			glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 0, square_colors);
+		} else {
+			glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 0, triangle_vertices);
+			glVertexAttribPointer(1, 4, GL_FLOAT, GL_FALSE, 0, triangle_colors);
+		}
 		glEnableVertexAttribArray(0);
 		glEnableVertexAttribArray(1);
-		glDrawArrays(GL_TRIANGLES, 0, 3);
+		glDrawArrays(GL_TRIANGLE_STRIP, 0, banding_pattern ? 4 : 3);
 
 		usleep(1e6 / 120); /* 120 Hz */
 		glFinish();
