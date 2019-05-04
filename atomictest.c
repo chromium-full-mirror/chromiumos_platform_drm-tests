@@ -16,6 +16,7 @@
  */
 
 #include <getopt.h>
+#include <inttypes.h>
 #include <pthread.h>
 #include <sync/sync.h>
 
@@ -585,7 +586,8 @@ static void log(struct atomictest_context *ctx)
 						break;
 				}
 
-				printf("CRTC_X: %u, CRTC_Y: %u, CRTC_W: %u, CRTC_H: %u}\n",
+				printf("CRTC_X: %" PRIu64 ", CRTC_Y: %" PRIu64 ", CRTC_W: %" PRIu64
+				       ", CRTC_H: %" PRIu64 "}\n",
 				       plane->crtc_x.value, plane->crtc_y.value,
 				       plane->crtc_w.value, plane->crtc_h.value);
 			}
