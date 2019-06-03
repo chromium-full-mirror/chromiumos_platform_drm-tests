@@ -15,6 +15,7 @@ struct bs_egl {
 	EGLContext ctx;
 	bool use_image_flush_external;
 	bool use_dma_buf_import_modifiers;
+	bool has_platform_device;
 
 	// Names are the original gl/egl function names with the prefix chopped off.
 	PFNEGLCREATEIMAGEKHRPROC CreateImageKHR;
@@ -24,6 +25,9 @@ struct bs_egl {
 	PFNEGLCREATESYNCKHRPROC CreateSyncKHR;
 	PFNEGLCLIENTWAITSYNCKHRPROC ClientWaitSyncKHR;
 	PFNEGLDESTROYSYNCKHRPROC DestroySyncKHR;
+	PFNEGLQUERYDEVICESEXTPROC QueryDevicesEXT;
+	PFNEGLQUERYDEVICESTRINGEXTPROC QueryDeviceStringEXT;
+	PFNEGLGETPLATFORMDISPLAYEXTPROC GetPlatformDisplayEXT;
 };
 
 struct bs_egl_fb {
@@ -59,10 +63,35 @@ void bs_egl_destroy(struct bs_egl **egl)
 	*egl = NULL;
 }
 
-bool bs_egl_setup(struct bs_egl *self)
+static int bs_check_drm_driver(const char *device_file_name, const char *driver)
+{
+	drmVersionPtr version;
+	int fd = open(device_file_name, O_RDWR);
+	if (fd < 0)
+		return -1;
+
+	version = drmGetVersion(fd);
+	if (!version) {
+		close(fd);
+		return -1;
+	}
+
+	if (strcmp(driver, version->name) == 0) {
+		drmFreeVersion(version);
+		close(fd);
+		return 1;
+	}
+
+	drmFreeVersion(version);
+	close(fd);
+	return 0;
+}
+
+bool bs_egl_setup(struct bs_egl *self, const char *render_driver)
 {
 	assert(self);
 	assert(!self->setup);
+	const char *egl_client_extensions = eglQueryString(EGL_NO_DISPLAY, EGL_EXTENSIONS);
 
 	self->CreateImageKHR = (PFNEGLCREATEIMAGEKHRPROC)eglGetProcAddress("eglCreateImageKHR");
 	self->DestroyImageKHR = (PFNEGLDESTROYIMAGEKHRPROC)eglGetProcAddress("eglDestroyImageKHR");
@@ -81,7 +110,57 @@ bool bs_egl_setup(struct bs_egl *self)
 	    (PFNEGLCLIENTWAITSYNCKHRPROC)eglGetProcAddress("eglClientWaitSyncKHR");
 	self->DestroySyncKHR = (PFNEGLDESTROYSYNCKHRPROC)eglGetProcAddress("eglDestroySyncKHR");
 
-	self->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+	if (egl_client_extensions &&
+	    bs_egl_has_extension("EGL_EXT_device_base", egl_client_extensions) &&
+	    bs_egl_has_extension("EGL_EXT_device_enumeration", egl_client_extensions) &&
+	    bs_egl_has_extension("EGL_EXT_device_query", egl_client_extensions) &&
+	    bs_egl_has_extension("EGL_EXT_platform_base", egl_client_extensions) &&
+	    bs_egl_has_extension("EGL_EXT_platform_device", egl_client_extensions)) {
+		self->QueryDevicesEXT =
+		    (PFNEGLQUERYDEVICESEXTPROC)eglGetProcAddress("eglQueryDevicesEXT");
+		self->QueryDeviceStringEXT =
+		    (PFNEGLQUERYDEVICESTRINGEXTPROC)eglGetProcAddress("eglQueryDeviceStringEXT");
+		self->GetPlatformDisplayEXT =
+		    (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+		self->has_platform_device = true;
+	} else {
+		self->has_platform_device = false;
+	}
+
+	if (render_driver && !self->has_platform_device) {
+		bs_debug_error("requested driver %s but required extensions are missing",
+			       render_driver);
+		return false;
+	}
+
+	self->display = EGL_NO_DISPLAY;
+
+	if (!self->has_platform_device || !render_driver) {
+		self->display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
+	} else {
+		EGLDeviceEXT devices[DRM_MAX_MINOR];
+		EGLint num_devices = 0;
+		EGLint d;
+
+		self->QueryDevicesEXT(DRM_MAX_MINOR, devices, &num_devices);
+		for (d = 0; d < num_devices; d++) {
+			const char *fn =
+			    self->QueryDeviceStringEXT(devices[d], EGL_DRM_DEVICE_FILE_EXT);
+			// We could query if display has EGL_EXT_device_drm. Or we can be lazy and
+			// just query the device string and ignore the devices where it fails.
+			if (!fn) {
+				continue;
+			}
+			if (bs_check_drm_driver(fn, render_driver) == 1) {
+				self->display = self->GetPlatformDisplayEXT(
+				    EGL_PLATFORM_DEVICE_EXT, (void *)devices[d], NULL);
+				break;
+			}
+		}
+		if (d == num_devices)
+			bs_debug_error("failed to find requested EGL driver %s.", render_driver);
+	}
+
 	if (self->display == EGL_NO_DISPLAY) {
 		bs_debug_error("failed to get egl display");
 		return false;

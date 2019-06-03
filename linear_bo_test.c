@@ -303,7 +303,7 @@ int main(int argc, char **argv)
 	uint32_t height = mode->vdisplay;
 
 	struct bs_egl *egl = bs_egl_new();
-	if (!bs_egl_setup(egl)) {
+	if (!bs_egl_setup(egl, NULL)) {
 		bs_debug_error("failed to setup egl context");
 		return 1;
 	}

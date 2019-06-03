@@ -31,12 +31,15 @@ static uint32_t allowed_formats[] = {
 	GBM_FORMAT_ABGR2101010,
 };
 
+
 static const struct option longopts[] = {
 	{ "format", required_argument, NULL, 'f' },
 	{ "modifier", required_argument, NULL, 'm' },
 	{ "test-page-flip-format-change", required_argument, NULL, 'p' },
 	{ "banding", no_argument, NULL, 'b' },
 	{ "help", no_argument, NULL, 'h' },
+	{ "display", required_argument, NULL, 'd' },
+	{ "renderer", required_argument, NULL, 'r' },
 	{ 0, 0, 0, 0 },
 };
 
@@ -121,6 +124,8 @@ static void print_help(const char *argv0, int drm_device_fd)
 	printf("  -p, --test-page-flip-format-change <format>  test page flips alternating formats.\n");
 	printf("  -b, --banding                                show a pattern that makes banding easy to spot if present.\n");
 	printf("  -h, --help                                   show help\n");
+	printf("  -d, --display <drm_driver_name>              dri driver name for display.\n");
+	printf("  -r, --renderer <drm_driver_name>             dri driver name for renderer.\n");
 	printf("\n");
 	printf(" <format> must be one of [ %s ].\n", allowed_formats_string);
 	printf(" <modifier> must be one of ");
@@ -350,6 +355,30 @@ static bool test_non_atomic(int drm_device_fd, drmModeModeInfo *mode, GLuint pro
 	return true;
 }
 
+struct check_driver_data {
+	char *driver;
+	int fd;
+};
+
+static bool check_driver(void *user, int fd)
+{
+	struct check_driver_data *data = (struct check_driver_data *)user;
+	drmVersionPtr version;
+
+	version = drmGetVersion(fd);
+	if (!version)
+		return false;
+
+	if (strcmp(data->driver, version->name) != 0) {
+		drmFreeVersion(version);
+		return false;
+	}
+
+	drmFreeVersion(version);
+	data->fd = dup(fd);
+	return true;
+}
+
 int main(int argc, char **argv)
 {
 	bool help_flag = false;
@@ -357,9 +386,11 @@ int main(int argc, char **argv)
 	uint32_t test_page_flip_format_change = 0;
 	uint64_t modifier = DRM_FORMAT_MOD_INVALID;
 	bool banding_pattern = false;
+	char *display_driver = NULL;
+	char *render_driver = NULL;
 
 	int c = -1;
-	while ((c = getopt_long(argc, argv, "m:hp:f:bl", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "m:hp:f:bld:r:", longopts, NULL)) != -1) {
 		switch (c) {
 			case 'p':
 				test_page_flip_format_change = find_format(optarg);
@@ -386,6 +417,20 @@ int main(int argc, char **argv)
 			case 'h':
 				help_flag = true;
 				break;
+			case 'd':
+				if (display_driver) {
+					free(display_driver);
+					display_driver = NULL;
+				}
+				display_driver = strdup(optarg);
+				break;
+			case 'r':
+				if (render_driver) {
+					free(render_driver);
+					render_driver = NULL;
+				}
+				render_driver = strdup(optarg);
+				break;
 		}
 	}
 
@@ -397,7 +442,16 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	} else {
-		drm_device_fd = bs_drm_open_main_display();
+		if (display_driver) {
+			struct check_driver_data data;
+			data.driver = display_driver;
+			data.fd = -1;
+			bs_open_enumerate("/dev/dri/card%u", 0, DRM_MAX_MINOR,
+					  check_driver, (void *)&data);
+			drm_device_fd = data.fd;
+		} else {
+			drm_device_fd = bs_drm_open_main_display();
+		}
 		if (drm_device_fd < 0) {
 			bs_debug_error("failed to open card for display");
 			return 1;
@@ -426,7 +480,7 @@ int main(int argc, char **argv)
 	drmModeModeInfo *mode = &connector->modes[0];
 
 	egl = bs_egl_new();
-	if (!bs_egl_setup(egl)) {
+	if (!bs_egl_setup(egl, render_driver)) {
 		bs_debug_error("failed to setup egl context");
 		return 1;
 	}

@@ -8,9 +8,15 @@
 #define __BS_DRM_H__
 
 #define _GNU_SOURCE
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+#include <GLES2/gl2.h>
+#include <GLES2/gl2ext.h>
 #include <assert.h>
+#include <drm_fourcc.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <gbm.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -21,13 +27,6 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
-
-#include <EGL/egl.h>
-#include <EGL/eglext.h>
-#include <GLES2/gl2.h>
-#include <GLES2/gl2ext.h>
-#include <drm_fourcc.h>
-#include <gbm.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 
@@ -97,7 +96,7 @@ uint32_t bs_drm_connectors_rank(const uint32_t *ranks, uint32_t connector_type);
 
 // drm_pipe.c
 struct bs_drm_pipe {
-	int fd;  // Always owned by the user of this library
+	int fd;	 // Always owned by the user of this library
 	uint32_t connector_id;
 	uint32_t encoder_id;
 	uint32_t crtc_id;
@@ -156,7 +155,10 @@ struct bs_egl_fb;
 
 struct bs_egl *bs_egl_new();
 void bs_egl_destroy(struct bs_egl **egl);
-bool bs_egl_setup(struct bs_egl *self);
+// initialize opengl.
+// use null platform when render_driver is null.
+// render_driver is drm driver name for GL driver to use
+bool bs_egl_setup(struct bs_egl *self, const char *render_driver);
 bool bs_egl_make_current(struct bs_egl *self);
 
 EGLImageKHR bs_egl_image_create_gbm(struct bs_egl *self, struct gbm_bo *bo);
