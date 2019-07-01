@@ -87,8 +87,28 @@ static void dma_buf_unmap(struct gbm_bo *bo, struct bs_map_info *info)
 static void *gem_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 		     struct bs_map_info *info, uint32_t *stride)
 {
-	uint32_t w = gbm_bo_get_width(bo);
-	uint32_t h = gbm_bo_get_height(bo);
+	uint32_t w, h, horizontal_subsampling, vertical_subsampling;
+	uint32_t format = gbm_bo_get_format(bo);
+
+	horizontal_subsampling = 1;
+	vertical_subsampling = 1;
+	if (plane > 0) {
+		switch (format)
+		{
+			case GBM_FORMAT_NV12:
+			case GBM_FORMAT_NV21:
+			case GBM_FORMAT_YVU420:
+				horizontal_subsampling = 2;
+				vertical_subsampling = 2;
+				break;
+			default:
+				break;
+		}
+	}
+
+	w = gbm_bo_get_width(bo) / horizontal_subsampling;
+	h = gbm_bo_get_height(bo) / vertical_subsampling;
+
 	void *ptr =
 	    gbm_bo_map(bo, 0, 0, w, h, GBM_BO_TRANSFER_READ_WRITE, stride, &info->map_data, plane);
 	return ptr;
