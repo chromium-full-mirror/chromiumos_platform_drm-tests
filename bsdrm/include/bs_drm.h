@@ -235,5 +235,9 @@ bool bs_parse_draw_format(const char *str, const struct bs_draw_format **format)
 void bs_print_supported_modifiers(int fd);
 bool bs_are_modifier_supported(int fd, int drm_plane_type);
 uint64_t bs_string_to_modifier(char *modifier_str);
+uint32_t bs_drm_find_property_id(int fd, uint32_t object_id, uint32_t object_type,
+				 const char *property_name);
+unsigned int bs_get_crtc_bitmask(int fd, uint32_t crtc_id);
+uint32_t bs_get_plane_id(int fd, uint32_t crtc_id);
 
 #endif

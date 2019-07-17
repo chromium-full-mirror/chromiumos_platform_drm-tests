@@ -3,19 +3,22 @@
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
-#include "bs_drm.h"
-
 #include <drm_fourcc.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <xf86drmMode.h>
+
+#include "bs_drm.h"
 
 struct modifier_table_t {
 	char *name;
 	uint64_t value;
 };
 
-#define MODIFIER_FORMAT(f) { #f, f }
+#define MODIFIER_FORMAT(f) \
+	{                  \
+#f, f      \
+	}
 static const struct modifier_table_t modifier_table[] = {
 	MODIFIER_FORMAT(DRM_FORMAT_MOD_INVALID),
 	MODIFIER_FORMAT(DRM_FORMAT_MOD_LINEAR),
@@ -161,4 +164,74 @@ uint64_t bs_string_to_modifier(char *modifier_str)
 	}
 
 	return -1;
+}
+
+uint32_t bs_drm_find_property_id(int fd, uint32_t object_id, uint32_t object_type,
+				 const char *property_name)
+{
+	drmModeObjectPropertiesPtr props = drmModeObjectGetProperties(fd, object_id, object_type);
+	assert(props);
+
+	uint32_t prop_id = 0;
+	for (uint32_t i = 0; !prop_id && i < props->count_props; ++i) {
+		drmModePropertyPtr prop = drmModeGetProperty(fd, props->props[i]);
+		if (!strcmp(prop->name, property_name)) {
+			prop_id = prop->prop_id;
+		}
+		drmModeFreeProperty(prop);
+	}
+	assert(prop_id);
+	drmModeFreeObjectProperties(props);
+	return prop_id;
+}
+
+unsigned int bs_get_crtc_bitmask(int fd, uint32_t crtc_id)
+{
+	drmModeResPtr mode_res = drmModeGetResources(fd);
+	if (mode_res == NULL) {
+		bs_debug_error("failed to get Mode Resources.");
+		return -1;
+	}
+
+	unsigned int crtc_offset = 0;
+	for (size_t i = 0; i < mode_res->count_crtcs; ++i) {
+		if (mode_res->crtcs[i] == crtc_id) {
+			crtc_offset = (1 << i);
+			break;
+		}
+	}
+
+	drmModeFreeResources(mode_res);
+	return crtc_offset;
+}
+
+uint32_t bs_get_plane_id(int fd, uint32_t crtc_id)
+{
+	unsigned int crtc_offset = bs_get_crtc_bitmask(fd, crtc_id);
+	if (crtc_offset < 1) {
+		bs_debug_error("failed to get a valid CRTC bitmask.");
+		return 0;
+	}
+
+	drmModePlaneResPtr plane_res = drmModeGetPlaneResources(fd);
+	if (plane_res == NULL) {
+		bs_debug_error("failed to get plane resources.");
+		return 0;
+	}
+
+	uint32_t plane_id = 0;
+	for (uint32_t plane_idx = 0; !plane_id && plane_idx < plane_res->count_planes;
+	     plane_idx++) {
+		drmModePlanePtr plane = drmModeGetPlane(fd, plane_res->planes[plane_idx]);
+		if (plane == NULL)
+			continue;
+
+		if (plane->possible_crtcs & crtc_offset) {
+			plane_id = plane_res->planes[plane_idx];
+		}
+		drmModeFreePlane(plane);
+	}
+
+	drmModeFreePlaneResources(plane_res);
+	return plane_id;
 }
