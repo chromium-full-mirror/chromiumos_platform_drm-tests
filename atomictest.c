@@ -1323,6 +1323,16 @@ static int test_rgba_primary(struct atomictest_context *ctx, struct atomictest_c
 	struct atomictest_plane *primary;
 	for (uint32_t i = 0; i < crtc->num_primary; i++) {
 		primary = get_plane(crtc, i, DRM_PLANE_TYPE_PRIMARY);
+		bool has_argb = false;
+		for (uint32_t i = 0; i < primary->drm_plane.count_formats; ++i) {
+			if (primary->drm_plane.formats[i] == DRM_FORMAT_ARGB8888) {
+				has_argb = true;
+				break;
+			}
+		}
+		if (!has_argb)
+			return 0;
+
 		CHECK_RESULT(init_plane(ctx, primary, DRM_FORMAT_ARGB8888, 0, 0, crtc->width,
 					crtc->height, crtc->crtc_id));
 
