@@ -4,21 +4,6 @@
  * found in the LICENSE file.
  */
 
-// Intel's Vulkan driver exposes an unregistered extension function,
-// vkCreateDmaBufImageINTEL.  There is no extension associated with the
-// function (as of 2016-09-21). The Intel developers added the function during
-// Vulkan's early early days, in Mesa's first Vulkan commit on 2015-05-08, to
-// provide a convenient way to test the driver. The Vulkan API had no extension
-// mechanism yet in that early pre-1.0 timeframe.
-//
-// We use vkCreateDmaBufImageINTEL, despite its ambiguous status, because there
-// does not yet exist a good alternative for importing a dma_buf as a VkImage.
-//
-// The Vulkan validation layer (VK_LAYER_LUNARG_standard_validation) does not
-// understand vkCreateDmaBufImageINTEL. To run with the validation layer,
-// #undef USE_vkCreateDmaBufImageINTEL and rebuild.
-#undef USE_vkCreateDmaBufImageINTEL
-
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -26,16 +11,11 @@
 
 #include <vulkan/vulkan.h>
 
-#ifdef USE_vkCreateDmaBufImageINTEL
-#include <vulkan/vulkan_intel.h>
-#endif
-
 #include "bs_drm.h"
 
 // Used for double-buffering.
 struct frame {
 	struct gbm_bo *bo;
-	int bo_prime_fd;
 	uint32_t drm_fb_id;
 	VkDeviceMemory vk_memory;
 	VkImage vk_image;
@@ -64,7 +44,7 @@ static void page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsi
 	*waiting_for_flip = false;
 }
 
-// Choose the first physical device. Exit on failure.
+// Choose a physical device that supports Vulkan 1.1 or later. Exit on failure.
 VkPhysicalDevice choose_physical_device(VkInstance inst)
 {
 	uint32_t n_phys_devs;
@@ -86,6 +66,8 @@ VkPhysicalDevice choose_physical_device(VkInstance inst)
 	// when bringing up Vulkan on a new system.
 	printf("Available VkPhysicalDevices:\n");
 
+	uint32_t physical_device_idx = 0;
+	VkPhysicalDevice physical_device = VK_NULL_HANDLE;
 	for (uint32_t i = 0; i < n_phys_devs; ++i) {
 		VkPhysicalDeviceProperties props;
 
@@ -107,12 +89,21 @@ VkPhysicalDevice choose_physical_device(VkInstance inst)
 		       props.pipelineCacheUUID[10], props.pipelineCacheUUID[11],
 		       props.pipelineCacheUUID[12], props.pipelineCacheUUID[13],
 		       props.pipelineCacheUUID[14], props.pipelineCacheUUID[15]);
+		if (physical_device == VK_NULL_HANDLE &&
+				VK_VERSION_MAJOR(props.apiVersion) >= 1 &&
+				VK_VERSION_MINOR(props.apiVersion) >= 1) {
+			physical_device_idx = i;
+			physical_device = phys_devs[i];
+		}
 	}
 
-	printf("Chose VkPhysicalDevice 0\n");
+	if (physical_device == VK_NULL_HANDLE) {
+		bs_debug_error("unable to find a suitable physical device");
+		exit(EXIT_FAILURE);
+	}
+	printf("Chose VkPhysicalDevice %d\n", physical_device_idx);
 	fflush(stdout);
-
-	return phys_devs[0];
+	return physical_device;
 }
 
 // Return the index of a graphics-enabled queue family. Return UINT32_MAX on
@@ -145,8 +136,155 @@ uint32_t choose_gfx_queue_family(VkPhysicalDevice phys_dev)
 	return family_idx;
 }
 
+bool is_format_valid(VkPhysicalDevice phys_dev, VkFormat format)
+{
+	VkFormatProperties2 format_props = {
+		.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
+	};
+	vkGetPhysicalDeviceFormatProperties2(phys_dev, format, &format_props);
+	return format_props.formatProperties.linearTilingFeatures &
+			VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+}
+
+VkImage create_image(VkPhysicalDevice phys_dev, VkDevice dev,
+		struct gbm_bo *bo, VkFormat format)
+{
+	VkImage image;
+	VkExternalImageFormatProperties external_image_format_props = {
+		.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
+	};
+	VkImageFormatProperties2 image_format_props = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+		.pNext = &external_image_format_props,
+	};
+	VkResult res = vkGetPhysicalDeviceImageFormatProperties2(phys_dev,
+		&(VkPhysicalDeviceImageFormatInfo2){
+			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+			.pNext = &(VkPhysicalDeviceExternalImageFormatInfo){
+				.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
+				.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+			},
+			.format = format,
+			.type = VK_IMAGE_TYPE_2D,
+			.tiling = VK_IMAGE_TILING_LINEAR,
+			.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+		},
+		&image_format_props);
+	check_vk_success(res, "vkGetPhysicalDeviceFormatProperties2");
+
+	VkExternalMemoryFeatureFlags feature_flags = external_image_format_props
+			.externalMemoryProperties
+			.externalMemoryFeatures;
+	if (!(feature_flags & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)) {
+		bs_debug_error("dma-buf does not support Vulkan import");
+		exit(EXIT_FAILURE);
+	}
+
+	// TODO(crbug.com/1002071): Pass the stride of the imported buffer to vkCreateImage
+	// once the extension is supported on Intel.
+	res = vkCreateImage(dev,
+		&(VkImageCreateInfo){
+		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		.pNext = &(VkExternalMemoryImageCreateInfo){
+			.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+			.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+		},
+		.imageType = VK_IMAGE_TYPE_2D,
+		.format = format,
+		.extent = (VkExtent3D){
+			gbm_bo_get_width(bo),
+			gbm_bo_get_height(bo), 1
+		},
+		.mipLevels = 1,
+		.arrayLayers = 1,
+		.samples = 1,
+		.tiling = VK_IMAGE_TILING_LINEAR,
+		.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		},
+		/*pAllocator*/ NULL, &image);
+	check_vk_success(res, "vkCreateImage");
+
+	return image;
+}
+
+bool bind_image_bo(VkDevice dev,
+		   VkImage image,
+		   struct gbm_bo *bo,
+		   VkDeviceMemory *mems)
+{
+	PFN_vkGetMemoryFdPropertiesKHR bs_vkGetMemoryFdPropertiesKHR =
+		(void *)vkGetDeviceProcAddr(dev, "vkGetMemoryFdPropertiesKHR");
+	if (bs_vkGetMemoryFdPropertiesKHR == NULL) {
+		bs_debug_error("vkGetDeviceProcAddr(\"vkGetMemoryFdPropertiesKHR\") failed");
+		return false;
+	}
+
+	int prime_fd = gbm_bo_get_fd(bo);
+	if (prime_fd < 0) {
+		bs_debug_error("failed to get prime fd for gbm_bo");
+		return false;
+	}
+
+	VkMemoryFdPropertiesKHR fd_props = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
+	};
+	bs_vkGetMemoryFdPropertiesKHR(dev,
+			VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+			prime_fd, &fd_props);
+
+	/* get image memory requirements */
+	const VkImageMemoryRequirementsInfo2 mem_reqs_info = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_REQUIREMENTS_INFO_2,
+		.image = image,
+	};
+	VkMemoryRequirements2 mem_reqs = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_REQUIREMENTS_2,
+	};
+	vkGetImageMemoryRequirements2(dev, &mem_reqs_info, &mem_reqs);
+
+	const uint32_t memory_type_bits = fd_props.memoryTypeBits &
+		mem_reqs.memoryRequirements.memoryTypeBits;
+	if (!memory_type_bits) {
+		bs_debug_error("no valid memory type");
+		close(prime_fd);
+		return false;
+	}
+
+	const VkMemoryDedicatedAllocateInfo memory_dedicated_info = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_DEDICATED_ALLOCATE_INFO,
+		.image = image,
+	};
+	const VkImportMemoryFdInfoKHR memory_fd_info = {
+		.sType = VK_STRUCTURE_TYPE_IMPORT_MEMORY_FD_INFO_KHR,
+		.pNext = &memory_dedicated_info,
+		.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+		.fd = prime_fd,
+	};
+	VkResult res = vkAllocateMemory(dev,
+		&(VkMemoryAllocateInfo){
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.pNext = &memory_fd_info,
+		.allocationSize = mem_reqs.memoryRequirements.size,
+
+		// Simply choose the first available memory type.  We
+		// need neither performance nor mmap, so all memory
+		// types are equally good.
+		.memoryTypeIndex = ffs(memory_type_bits) - 1,
+		},
+		/*pAllocator*/ NULL, mems);
+	check_vk_success(res, "vkAllocateMemory");
+
+	res = vkBindImageMemory(dev, image, mems[0], 0);
+	check_vk_success(res, "vkBindImageMemory");
+
+	return true;
+}
+
 int main(int argc, char **argv)
 {
+	const uint32_t gbm_format = GBM_FORMAT_XBGR8888;
+	const VkFormat format = VK_FORMAT_A8B8G8R8_UNORM_PACK32;
 	VkInstance inst;
 	VkPhysicalDevice phys_dev;
 	uint32_t gfx_queue_family_idx;
@@ -190,7 +328,7 @@ int main(int argc, char **argv)
 		.pApplicationInfo =
 		    &(VkApplicationInfo){
 			.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
-			.apiVersion = VK_MAKE_VERSION(1, 0, 0),
+			.apiVersion = VK_MAKE_VERSION(1, 1, 0),
 		    },
 	    },
 	    /*pAllocator*/ NULL, &inst);
@@ -204,6 +342,33 @@ int main(int argc, char **argv)
 		    "VkPhysicalDevice exposes no VkQueueFamilyProperties "
 		    "with graphics");
 		exit(EXIT_FAILURE);
+	}
+
+	if (!is_format_valid(phys_dev, format)) {
+		bs_debug_error("VkPhysicalDevice does not support 0x%x", format);
+		exit(EXIT_FAILURE);
+	}
+
+	const uint32_t num_required_extensions = 2;
+	const char* required_extensions[] = {
+		"VK_KHR_external_memory_fd",
+		"VK_EXT_external_memory_dma_buf",
+	};
+	uint32_t extension_count;
+	vkEnumerateDeviceExtensionProperties(phys_dev, NULL, &extension_count, NULL);
+	VkExtensionProperties available_extensions[extension_count];
+	vkEnumerateDeviceExtensionProperties(phys_dev, NULL, &extension_count, available_extensions);
+	for (uint32_t i = 0; i < num_required_extensions; i++) {
+		uint32_t j;
+		for (j = 0; j < extension_count; j++) {
+			if (strcmp(required_extensions[i], available_extensions[j].extensionName) == 0) {
+				break;
+			}
+		}
+		if (j == extension_count) {
+			bs_debug_error("unsupported device extension: %s", required_extensions[i]);
+			exit(EXIT_FAILURE);
+		}
 	}
 
 	res = vkCreateDevice(phys_dev,
@@ -220,18 +385,11 @@ int main(int argc, char **argv)
 
 					 },
 				     },
+				 .enabledExtensionCount = num_required_extensions,
+				 .ppEnabledExtensionNames = required_extensions,
 			     },
 			     /*pAllocator*/ NULL, &dev);
 	check_vk_success(res, "vkCreateDevice");
-
-#if USE_vkCreateDmaBufImageINTEL
-	PFN_vkCreateDmaBufImageINTEL bs_vkCreateDmaBufImageINTEL =
-	    (void *)vkGetDeviceProcAddr(dev, "vkCreateDmaBufImageINTEL");
-	if (bs_vkCreateDmaBufImageINTEL == NULL) {
-		bs_debug_error("vkGetDeviceProcAddr(\"vkCreateDmaBufImageINTEL\') failed");
-		exit(EXIT_FAILURE);
-	}
-#endif
 
 	vkGetDeviceQueue(dev, gfx_queue_family_idx, /*queueIndex*/ 0, &gfx_queue);
 
@@ -253,7 +411,7 @@ int main(int argc, char **argv)
 		.pAttachments =
 		    (VkAttachmentDescription[]){
 			{
-			    .format = VK_FORMAT_A8B8G8R8_UNORM_PACK32,
+			    .format = format,
 			    .samples = 1,
 			    .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
 			    .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
@@ -283,10 +441,14 @@ int main(int argc, char **argv)
 	for (int i = 0; i < BS_ARRAY_LEN(frames); ++i) {
 		struct frame *fr = &frames[i];
 
-		fr->bo = gbm_bo_create(gbm, mode->hdisplay, mode->vdisplay, GBM_FORMAT_XBGR8888,
-				       GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING);
+		fr->bo = gbm_bo_create(gbm, mode->hdisplay, mode->vdisplay, gbm_format,
+				GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
 		if (fr->bo == NULL) {
 			bs_debug_error("failed to create framebuffer's gbm_bo");
+			return 1;
+		}
+		if (gbm_bo_get_modifier(fr->bo)) {
+			bs_debug_error("gmb_bo was created with modifiers");
 			return 1;
 		}
 
@@ -296,70 +458,23 @@ int main(int argc, char **argv)
 			return 1;
 		}
 
-		fr->bo_prime_fd = gbm_bo_get_fd(fr->bo);
-		if (fr->bo_prime_fd < 0) {
-			bs_debug_error("failed to get prime fd for gbm_bo");
-			return 1;
+		fr->vk_image = create_image(phys_dev, dev, fr->bo, format);
+		if (fr->vk_image == VK_NULL_HANDLE) {
+			bs_debug_error("failed to create VkImage");
+			exit(EXIT_FAILURE);
 		}
 
-#if USE_vkCreateDmaBufImageINTEL
-		res = bs_vkCreateDmaBufImageINTEL(
-		    dev,
-		    &(VkDmaBufImageCreateInfo){
-			.sType = VK_STRUCTURE_TYPE_DMA_BUF_IMAGE_CREATE_INFO_INTEL,
-			.fd = fr->bo_prime_fd,
-			.format = VK_FORMAT_A8B8G8R8_UNORM_PACK32,
-			.extent = (VkExtent3D){ mode->hdisplay, mode->hdisplay, 1 },
-			.strideInBytes = gbm_bo_get_stride(fr->bo),
-		    },
-		    /*pAllocator*/ NULL, &fr->vk_memory, &fr->vk_image);
-		check_vk_success(res, "vkCreateDmaBufImageINTEL");
-#else
-		res = vkCreateImage(dev,
-				    &(VkImageCreateInfo){
-					.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-					.imageType = VK_IMAGE_TYPE_2D,
-					.format = VK_FORMAT_A8B8G8R8_UNORM_PACK32,
-					.extent = (VkExtent3D){ mode->hdisplay, mode->hdisplay, 1 },
-					.mipLevels = 1,
-					.arrayLayers = 1,
-					.samples = 1,
-					.tiling = VK_IMAGE_TILING_LINEAR,
-					.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-					.queueFamilyIndexCount = 1,
-					.pQueueFamilyIndices = (uint32_t[]){ gfx_queue_family_idx },
-					.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-				    },
-				    /*pAllocator*/ NULL, &fr->vk_image);
-		check_vk_success(res, "vkCreateImage");
-
-		VkMemoryRequirements mem_reqs;
-		vkGetImageMemoryRequirements(dev, fr->vk_image, &mem_reqs);
-
-		res = vkAllocateMemory(dev,
-				       &(VkMemoryAllocateInfo){
-					   .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-					   .allocationSize = mem_reqs.size,
-
-					   // Simply choose the first available memory type.
-					   // We need neither performance nor mmap, so all
-					   // memory types are equally good.
-					   .memoryTypeIndex = ffs(mem_reqs.memoryTypeBits) - 1,
-				       },
-				       /*pAllocator*/ NULL, &fr->vk_memory);
-		check_vk_success(res, "vkAllocateMemory");
-
-		res = vkBindImageMemory(dev, fr->vk_image, fr->vk_memory,
-					/*memoryOffset*/ 0);
-		check_vk_success(res, "vkBindImageMemory");
-#endif
+		if (!bind_image_bo(dev, fr->vk_image, fr->bo, &fr->vk_memory)) {
+			bs_debug_error("failed to bind bo to image");
+			exit(EXIT_FAILURE);
+		}
 
 		res = vkCreateImageView(dev,
 					&(VkImageViewCreateInfo){
 					    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
 					    .image = fr->vk_image,
 					    .viewType = VK_IMAGE_VIEW_TYPE_2D,
-					    .format = VK_FORMAT_A8B8G8R8_UNORM_PACK32,
+					    .format = format,
 					    .components =
 						(VkComponentMapping){
 						    .r = VK_COMPONENT_SWIZZLE_IDENTITY,
@@ -427,6 +542,37 @@ int main(int argc, char **argv)
 					   });
 		check_vk_success(res, "vkBeginCommandBuffer");
 
+		// Transfer ownership of the dma-buf from DRM to Vulkan.
+		vkCmdPipelineBarrier(
+				fr->vk_cmd_buf,
+				// srcStageMask is ignored when acquiring ownership, but various
+				// validation layers complain when you pass 0 here, so we just set
+				// it to the same as dstStageMask.
+				VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+				VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+				0, 0, NULL, 0, NULL,
+				1,
+				&(VkImageMemoryBarrier){
+					.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+					.pNext = NULL,
+					.srcAccessMask = 0, /** ignored for transfers */
+					.dstAccessMask = 0, /** ignored for transfers */
+					.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+					.newLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+					// TODO(crbug.com/1000666): Replace this with the foreign queue
+					// family once the extension is available on CrOS.
+					.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+					.dstQueueFamilyIndex = gfx_queue_family_idx,
+					.image = fr->vk_image,
+					.subresourceRange = (VkImageSubresourceRange){
+				    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				    .baseMipLevel = 0,
+				    .levelCount = 1,
+				    .baseArrayLayer = 0,
+				    .layerCount = 1,
+					},
+				});
+
 		// Cycle along the circumference of the RGB color wheel.
 		VkClearValue clear_color = {
 			.color =
@@ -459,6 +605,36 @@ int main(int argc, char **argv)
 				     VK_SUBPASS_CONTENTS_INLINE);
 		vkCmdEndRenderPass(fr->vk_cmd_buf);
 
+		// Transfer ownership of the dma-buf from Vulkan to DRM.
+		vkCmdPipelineBarrier(
+				fr->vk_cmd_buf,
+				VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+				// dstStageMask is ignored when releasing ownership, but various
+				// validation layers complain when you pass 0 here, so we just set
+				// it to the same as srcStageMask.
+				VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT,
+				0, 0, NULL, 0, NULL,
+				1,
+				&(VkImageMemoryBarrier){
+					.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+					.pNext = NULL,
+					.srcAccessMask = 0, /** ignored for transfers */
+					.dstAccessMask = 0, /** ignored for transfers */
+					.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+					.newLayout = VK_IMAGE_LAYOUT_GENERAL,
+					.srcQueueFamilyIndex = gfx_queue_family_idx,
+					// TODO(crbug.com/1000666): Replace this with the foreign queue
+					// family once the extension is available on CrOS.
+					.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+					.image = fr->vk_image,
+					.subresourceRange = (VkImageSubresourceRange){
+				    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				    .baseMipLevel = 0,
+				    .levelCount = 1,
+				    .baseArrayLayer = 0,
+				    .layerCount = 1,
+					},
+				});
 		res = vkEndCommandBuffer(fr->vk_cmd_buf);
 		check_vk_success(res, "vkEndCommandBuffer");
 
