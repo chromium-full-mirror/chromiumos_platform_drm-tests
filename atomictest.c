@@ -1007,27 +1007,44 @@ static int test_video_overlay(struct atomictest_context *ctx, struct atomictest_
 	return ret;
 }
 
+static int prop_contains_value(drmModePropertyPtr prop, uint64_t value)
+{
+	for (uint32_t i = 0; i < prop->count_values; i++) {
+		if (prop->values[i] == value)
+			return 1;
+	}
+	return 0;
+}
+
 static int test_orientation(struct atomictest_context *ctx, struct atomictest_crtc *crtc)
 {
 	int ret = 0;
 	struct atomictest_plane *primary, *overlay;
+	drmModePropertyPtr rotation_prop;
 	for (uint32_t i = 0; i < crtc->num_overlay; i++) {
 		overlay = get_plane(crtc, i, DRM_PLANE_TYPE_OVERLAY);
 		if (!overlay->rotation.pid)
 			continue;
 
+		rotation_prop = drmModeGetProperty(ctx->fd, overlay->rotation.pid);
+		CHECK(rotation_prop);
 		CHECK_RESULT(init_plane_any_format(ctx, overlay, 0, 0, crtc->width, crtc->height,
 						   crtc->crtc_id, false));
+		CHECK(prop_contains_value(rotation_prop, DRM_ROTATE_0));
 		overlay->rotation.value = DRM_ROTATE_0;
 		set_plane_props(overlay, ctx->pset);
 		CHECK_RESULT(draw_to_plane(ctx->mapper, overlay, DRAW_LINES));
 		ret |= test_and_commit(ctx, 1e6);
 
-		overlay->rotation.value = DRM_REFLECT_Y;
-		set_plane_props(overlay, ctx->pset);
-		ret |= test_and_commit(ctx, 1e6);
+		if (prop_contains_value(rotation_prop, DRM_REFLECT_Y)) {
+			overlay->rotation.value = DRM_REFLECT_Y;
+			set_plane_props(overlay, ctx->pset);
+			ret |= test_and_commit(ctx, 1e6);
 
-		CHECK_RESULT(disable_plane(ctx, overlay));
+			CHECK_RESULT(disable_plane(ctx, overlay));
+		}
+		drmModeFreeProperty(rotation_prop);
+		rotation_prop = NULL;
 	}
 
 	for (uint32_t i = 0; i < crtc->num_primary; i++) {
@@ -1035,19 +1052,25 @@ static int test_orientation(struct atomictest_context *ctx, struct atomictest_cr
 		if (!primary->rotation.pid)
 			continue;
 
+		rotation_prop = drmModeGetProperty(ctx->fd, primary->rotation.pid);
+		CHECK(rotation_prop);
 		CHECK_RESULT(init_plane_any_format(ctx, primary, 0, 0, crtc->width, crtc->height,
 						   crtc->crtc_id, false));
-
+		CHECK(prop_contains_value(rotation_prop, DRM_ROTATE_0));
 		primary->rotation.value = DRM_ROTATE_0;
 		set_plane_props(primary, ctx->pset);
 		CHECK_RESULT(draw_to_plane(ctx->mapper, primary, DRAW_LINES));
 		ret |= test_and_commit(ctx, 1e6);
 
-		primary->rotation.value = DRM_REFLECT_Y;
-		set_plane_props(primary, ctx->pset);
-		ret |= test_and_commit(ctx, 1e6);
+		if (prop_contains_value(rotation_prop, DRM_REFLECT_Y)) {
+			primary->rotation.value = DRM_REFLECT_Y;
+			set_plane_props(primary, ctx->pset);
+			ret |= test_and_commit(ctx, 1e6);
+		}
 
 		CHECK_RESULT(disable_plane(ctx, primary));
+		drmModeFreeProperty(rotation_prop);
+		rotation_prop = NULL;
 	}
 
 	return ret;
