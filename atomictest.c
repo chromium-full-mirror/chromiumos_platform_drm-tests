@@ -1657,8 +1657,9 @@ static int run_atomictest(const char *name, uint32_t crtc_mask)
 
 	ret = drmSetClientCap(fd, DRM_CLIENT_CAP_ATOMIC, 1);
 	if (ret) {
-		bs_debug_error("failed to enable DRM_CLIENT_CAP_ATOMIC");
-		ret = -1;
+		bs_debug_warning("failed to enable DRM_CLIENT_CAP_ATOMIC");
+		/* We want to allow per-board disabling of atomic */
+		ret = 0;
 		goto destroy_gbm_device;
 	}
 
