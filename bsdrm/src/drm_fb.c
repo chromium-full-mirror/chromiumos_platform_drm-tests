@@ -97,6 +97,13 @@ uint32_t bs_drm_fb_builder_create_fb(struct bs_drm_fb_builder *self)
 		return 0;
 	}
 
+	// Intel cannot scanout AR30/AB30 formats, but can do the X variants.
+	unsigned format = self->format;
+	if (format == GBM_FORMAT_ARGB2101010)
+		format = GBM_FORMAT_XRGB2101010;
+	if (format == GBM_FORMAT_ABGR2101010)
+		format = GBM_FORMAT_XBGR2101010;
+
 	if (self->plane_count == 0 || self->plane_count > MAX_PLANE_COUNT) {
 		bs_debug_error("failed to create drm fb: plane count %zu is invalid\n",
 			       self->plane_count);
@@ -118,11 +125,11 @@ uint32_t bs_drm_fb_builder_create_fb(struct bs_drm_fb_builder *self)
 					  DRM_FORMAT_MOD_NONE, DRM_FORMAT_MOD_NONE };
 		for (int i = 0; i < self->plane_count; i++)
 			modifiers[i] = self->modifier;
-		ret = drmModeAddFB2WithModifiers(self->fd, self->width, self->height, self->format,
+		ret = drmModeAddFB2WithModifiers(self->fd, self->width, self->height, format,
 						 self->handles, self->strides, self->offsets,
 						 modifiers, &fb_id, DRM_MODE_FB_MODIFIERS);
 	} else {
-		ret = drmModeAddFB2(self->fd, self->width, self->height, self->format,
+		ret = drmModeAddFB2(self->fd, self->width, self->height, format,
 				    self->handles, self->strides, self->offsets, &fb_id, 0);
 	}
 

@@ -27,6 +27,8 @@ static uint32_t allowed_formats[] = {
 	GBM_FORMAT_XBGR8888,
 	GBM_FORMAT_XRGB2101010,
 	GBM_FORMAT_XBGR2101010,
+	GBM_FORMAT_ARGB2101010,
+	GBM_FORMAT_ABGR2101010,
 };
 
 static const struct option longopts[] = {
@@ -444,7 +446,8 @@ int main(int argc, char **argv)
 		}
 
 		if (bos[fb_index] == NULL) {
-			bs_debug_error("failed to allocate framebuffer");
+			bs_debug_error("failed to allocate BO %s modifiers",
+				(modifier != DRM_FORMAT_MOD_INVALID ? "with" : "without"));
 			return 1;
 		}
 
