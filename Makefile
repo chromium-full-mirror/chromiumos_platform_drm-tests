@@ -28,10 +28,15 @@ all: \
 	CC_BINARY(stripe) \
 	CC_BINARY(swrast_test) \
 	CC_BINARY(synctest) \
-	CC_BINARY(vgem_test)
+	CC_BINARY(vgem_test) \
 
 ifeq ($(USE_VULKAN),1)
 all: CC_BINARY(vk_glow)
+endif
+
+# TODO(pwarren): fix in ARM
+ifneq ($(ARCH),arm)
+all: CC_BINARY(udmabuf_create_test)
 endif
 
 CC_BINARY(drm_cursor_test): drm_cursor_test.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
@@ -64,6 +69,12 @@ CC_BINARY(mapped_texture_test): LDLIBS += -lGLESv2
 
 CC_BINARY(synctest): synctest.o
 CC_BINARY(synctest): LDLIBS += -lsync
+
+ifneq ($(ARCH),arm)
+CC_BINARY(udmabuf_create_test): udmabuf_create_test.o \
+	CC_STATIC_LIBRARY(libbsdrm.pic.a)
+CC_BINARY(udmabuf_create_test): LDLIBS += -lGLESv2
+endif
 
 ifeq ($(USE_VULKAN),1)
 CC_BINARY(vk_glow): vk_glow.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
