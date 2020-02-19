@@ -110,7 +110,7 @@ static void *gem_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 	h = gbm_bo_get_height(bo) / vertical_subsampling;
 
 	void *ptr =
-	    gbm_bo_map(bo, 0, 0, w, h, GBM_BO_TRANSFER_READ_WRITE, stride, &info->map_data, plane);
+	    gbm_bo_map2(bo, 0, 0, w, h, GBM_BO_TRANSFER_READ_WRITE, stride, &info->map_data, plane);
 	return ptr;
 }
 
