@@ -985,6 +985,11 @@ static int test_multiple_planes(struct atomictest_context *ctx, struct atomictes
 		/* Disable primary plane and verify overlays show up. */
 		CHECK_RESULT(disable_plane(ctx, primary));
 		ret |= test_and_commit(ctx, 1e6);
+
+		for (uint32_t j = 0; j < crtc->num_cursor; j++) {
+			cursor = get_plane(crtc, j, DRM_PLANE_TYPE_CURSOR);
+			CHECK_RESULT(disable_plane(ctx, cursor));
+		}
 	}
 
 	return ret;
