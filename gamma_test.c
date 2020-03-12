@@ -13,6 +13,9 @@
 #define TABLE_NEGATIVE 1
 #define TABLE_POW 2
 #define TABLE_STEP 3
+// TABLE_PIECEWISE_HDR mimics Chrome's PIECEWISE_HDR gfx::ColorSpace::TranferID,
+// basically an sRGB up to a given elbow or joint, and linear after.
+#define TABLE_PIECEWISE_HDR 4
 
 #define FLAG_INTERNAL 'i'
 #define FLAG_EXTERNAL 'e'
@@ -23,6 +26,7 @@
 #define FLAG_CRTCS 'c'
 #define FLAG_PERSIST 'p'
 #define FLAG_STEP 's'
+#define FLAG_HDR 'x'
 #define FLAG_HELP 'h'
 
 static struct option command_options[] = { { "internal", no_argument, NULL, FLAG_INTERNAL },
@@ -34,6 +38,7 @@ static struct option command_options[] = { { "internal", no_argument, NULL, FLAG
 					   { "crtcs", required_argument, NULL, FLAG_CRTCS },
 					   { "persist", no_argument, NULL, FLAG_PERSIST },
 					   { "step", no_argument, NULL, FLAG_STEP },
+					   { "hdr", required_argument, NULL, FLAG_HDR },
 					   { "help", no_argument, NULL, FLAG_HELP },
 					   { NULL, 0, NULL, 0 } };
 
@@ -76,6 +81,39 @@ static void gamma_step(uint16_t *table, int size)
 	}
 }
 
+static void gamma_piecewise_linear(uint16_t *table, int size, float joint)
+{
+	const float gamma = 1 / 2.2f;
+	// |joint_i| is the index in [0, size) where sRGB and linear curves meet.
+	const size_t joint_i = joint * size;
+	// |joint_v| is the gamma output value where sRGB and linear curves meet.
+	const float joint_v = pow(joint, gamma);
+	// |slope| is the slope of the linear part.
+	const float slope = (1 - joint_v) / (1 - joint);
+	int i;
+	for (i = 0; i < size; i++) {
+		float v = (float)(i) / (float)(size - 1);
+
+		if (i < joint_i)
+			v = pow(v, gamma);
+		else
+			v = joint_v + slope * (v - joint);
+
+		v *= 65535.0f;
+		table[i] = (uint16_t)v;
+	}
+}
+
+static const char* gamma_name(int gamma_table_id)
+{
+	const char *table_names[] = { "TABLE_LINEAR", "TABLE_NEGATIVE", "TABLE_POW", "TABLE_STEP",
+				      "TABLE_PIECEWISE_HDR" };
+	const size_t max_gamma_table_id = sizeof(table_names)/sizeof(table_names[0]);
+	if (gamma_table_id >= max_gamma_table_id)
+		return NULL;
+	return table_names[gamma_table_id];
+}
+
 static void fsleep(double secs)
 {
 	usleep((useconds_t)(1000000.0f * secs));
@@ -96,12 +134,15 @@ static drmModeModeInfoPtr find_best_mode(int mode_count, drmModeModeInfoPtr mode
 	return &modes[0];
 }
 
-static bool draw_pattern(struct bs_mapper *mapper, struct gbm_bo *bo)
+static bool draw_pattern(struct bs_mapper *mapper, struct gbm_bo *bo, int gbm_format)
 {
 	uint32_t stride;
 	const uint32_t height = gbm_bo_get_height(bo);
 	const uint32_t stripw = gbm_bo_get_width(bo) / 256;
 	const uint32_t striph = height / 4;
+
+	if (gbm_format != GBM_FORMAT_XRGB8888 && gbm_format != GBM_FORMAT_XRGB2101010)
+		return false;
 
 	void *map_data;
 	uint8_t *bo_ptr = bs_mapper_map(mapper, bo, 0, &map_data, &stride);
@@ -138,10 +179,17 @@ static bool draw_pattern(struct bs_mapper *mapper, struct gbm_bo *bo)
 			uint8_t *row_ptr = &bo_ptr[y * stride];
 			for (uint32_t i = 0; i < 256; i++) {
 				for (uint32_t x = i * stripw; x < (i + 1) * stripw; x++) {
-					row_ptr[x * 4 + 0] = b * i;
-					row_ptr[x * 4 + 1] = g * i;
-					row_ptr[x * 4 + 2] = r * i;
-					row_ptr[x * 4 + 3] = 0;
+					if (gbm_format == GBM_FORMAT_XRGB8888) {
+						row_ptr[x * 4 + 0] = b * i;
+						row_ptr[x * 4 + 1] = g * i;
+						row_ptr[x * 4 + 2] = r * i;
+						row_ptr[x * 4 + 3] = 0;
+					} else {
+						*(uint32_t *)(&row_ptr[x * 4]) =
+						    (((r * i) << 2) | ((r * i) >> 6)) << 20 |
+						    (((g * i) << 2) | ((g * i) >> 6)) << 10 |
+						    (((b * i) << 2) | ((b * i) >> 6));
+					}
 				}
 			}
 		}
@@ -152,7 +200,8 @@ out:
 	return success;
 }
 
-static int set_gamma(int fd, uint32_t crtc_id, int gamma_size, int gamma_table, float gamma)
+// |parameter| is passed to the appropriate |gamma_table| generation function.
+static int set_gamma(int fd, uint32_t crtc_id, int gamma_size, int gamma_table, float parameter)
 {
 	int res;
 	uint16_t *r, *g, *b;
@@ -160,7 +209,7 @@ static int set_gamma(int fd, uint32_t crtc_id, int gamma_size, int gamma_table, 
 	g = calloc(gamma_size, sizeof(*g));
 	b = calloc(gamma_size, sizeof(*b));
 
-	printf("Setting gamma table %d\n", gamma_table);
+	printf("Setting gamma table index %d (%s)\n", gamma_table, gamma_name(gamma_table));
 	switch (gamma_table) {
 		case TABLE_LINEAR:
 			gamma_linear(r, gamma_size);
@@ -173,14 +222,19 @@ static int set_gamma(int fd, uint32_t crtc_id, int gamma_size, int gamma_table, 
 			gamma_inv(b, gamma_size);
 			break;
 		case TABLE_POW:
-			gamma_pow(r, gamma_size, gamma);
-			gamma_pow(g, gamma_size, gamma);
-			gamma_pow(b, gamma_size, gamma);
+			gamma_pow(r, gamma_size, parameter);
+			gamma_pow(g, gamma_size, parameter);
+			gamma_pow(b, gamma_size, parameter);
 			break;
 		case TABLE_STEP:
 			gamma_step(r, gamma_size);
 			gamma_step(g, gamma_size);
 			gamma_step(b, gamma_size);
+			break;
+		case TABLE_PIECEWISE_HDR:
+			gamma_piecewise_linear(r, gamma_size, parameter);
+			gamma_piecewise_linear(g, gamma_size, parameter);
+			gamma_piecewise_linear(b, gamma_size, parameter);
 			break;
 	}
 
@@ -210,6 +264,7 @@ command line options:\
 --persist - do not reset gamma table at the end of the test\n\
 --internal - display tests on internal display\n\
 --external - display tests on external display\n\
+--hdr=x - sets piecewise HDR gamma table with SDR-HDR joint at x (usually 0.5)\n\
 ");
 }
 
@@ -219,7 +274,8 @@ int main(int argc, char **argv)
 	int persist = 0;
 	float time = 5.0;
 	float gamma = 2.2f;
-	float table = TABLE_LINEAR;
+	float srgb_joint = 0.0f;
+	int table = TABLE_LINEAR;
 	uint32_t crtcs = 0xFFFF;
 
 	for (;;) {
@@ -256,6 +312,11 @@ int main(int argc, char **argv)
 
 			case FLAG_STEP:
 				table = TABLE_STEP;
+				break;
+
+			case FLAG_HDR:
+				srgb_joint = strtof(optarg, NULL);
+				table = TABLE_PIECEWISE_HDR;
 				break;
 
 			case FLAG_TIME:
@@ -313,6 +374,9 @@ int main(int argc, char **argv)
 		if (!(crtcs & crtc_mask))
 			continue;
 
+		if (c > 0)
+			printf("\n");
+
 		if (connector != NULL) {
 			drmModeFreeConnector(connector);
 			connector = NULL;
@@ -338,7 +402,7 @@ int main(int argc, char **argv)
 			continue;
 		}
 
-		printf("CRTC:%d gamma size:%d\n", pipe.crtc_id, gamma_size);
+		printf("CRTC:%d gamma table size:%d\n", pipe.crtc_id, gamma_size);
 
 		printf("Using CRTC:%u ENCODER:%u CONNECTOR:%u\n", pipe.crtc_id, pipe.encoder_id,
 		       pipe.connector_id);
@@ -351,10 +415,13 @@ int main(int argc, char **argv)
 
 		printf("Using mode %s\n", mode->name);
 
-		printf("Creating buffer %ux%u\n", mode->hdisplay, mode->vdisplay);
-		struct gbm_bo *bo =
-		    gbm_bo_create(gbm, mode->hdisplay, mode->vdisplay, GBM_FORMAT_XRGB8888,
-				  GBM_BO_USE_SCANOUT | GBM_BO_USE_SW_WRITE_RARELY);
+		const bool is_hdr = table == TABLE_PIECEWISE_HDR;
+		const int gbm_format = is_hdr ? GBM_FORMAT_XRGB2101010 : GBM_FORMAT_XRGB8888;
+
+		printf("Creating buffer %ux%u (%s)\n", mode->hdisplay, mode->vdisplay,
+		       (is_hdr ? "XR30" : "XR24"));
+		struct gbm_bo *bo = gbm_bo_create(gbm, mode->hdisplay, mode->vdisplay, gbm_format,
+						  GBM_BO_USE_SCANOUT | GBM_BO_USE_SW_WRITE_RARELY);
 		if (!bo) {
 			bs_debug_error("failed to create buffer object");
 			return 1;
@@ -366,7 +433,7 @@ int main(int argc, char **argv)
 			return 1;
 		}
 
-		if (!draw_pattern(mapper, bo)) {
+		if (!draw_pattern(mapper, bo, gbm_format)) {
 			bs_debug_error("failed to draw pattern on buffer object");
 			return 1;
 		}
@@ -378,7 +445,7 @@ int main(int argc, char **argv)
 			return 1;
 		}
 
-		ret = set_gamma(fd, pipe.crtc_id, gamma_size, table, gamma);
+		ret = set_gamma(fd, pipe.crtc_id, gamma_size, table, is_hdr ? srgb_joint : gamma);
 		if (ret)
 			return ret;
 
