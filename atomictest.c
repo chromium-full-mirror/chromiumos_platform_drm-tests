@@ -1128,7 +1128,7 @@ static int test_plane_alpha(struct atomictest_context *ctx, struct atomictest_cr
 
 static void *inc_timeline(void *user_data)
 {
-	int timeline_fd = (int)user_data;
+	int timeline_fd = *(int *)user_data;
 	uint32_t sleep_micro_secs = automatic ? 1e3 : 1e5;
 	usleep(sleep_micro_secs);
 	sw_sync_timeline_inc(timeline_fd, 1);
@@ -1160,7 +1160,7 @@ static int test_in_fence(struct atomictest_context *ctx, struct atomictest_crtc 
 	set_crtc_props(crtc, ctx->pset);
 
 	CHECK(
-	    !pthread_create(&inc_timeline_thread, NULL, inc_timeline, (void *)(uintptr_t)timeline));
+	    !pthread_create(&inc_timeline_thread, NULL, inc_timeline, &timeline));
 
 	ret |= test_and_commit(ctx, 1e6);
 	CHECK(!pthread_join(inc_timeline_thread, NULL));
