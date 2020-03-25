@@ -16,6 +16,7 @@ bsdrm_srcs = \
 	bsdrm/src/drm_pipe.c \
 	bsdrm/src/egl.c \
 	bsdrm/src/gl.c \
+	bsdrm/src/kms.c \
 	bsdrm/src/mmap.c \
 	bsdrm/src/open.c \
 	bsdrm/src/pipe.c
@@ -31,7 +32,7 @@ LOCAL_C_INCLUDES := \
 	$(LOCAL_PATH)/bsdrm/include \
 	$(VENDOR_SDK_INCLUDES)
 LOCAL_CFLAGS := -O2 -g -W -Wall
-LOCAL_SHARED_LIBRARIES := libdrm libminigbm
+LOCAL_SHARED_LIBRARIES := libdrm libminigbm libsync
 
 include $(BUILD_EXECUTABLE)
 
@@ -46,6 +47,6 @@ LOCAL_C_INCLUDES := \
 	$(LOCAL_PATH)/bsdrm/include \
 	$(VENDOR_SDK_INCLUDES)
 LOCAL_CFLAGS := -O2 -g -W -Wall
-LOCAL_SHARED_LIBRARIES := libdrm libminigbm
+LOCAL_SHARED_LIBRARIES := libdrm libminigbm libsync
 
 include $(BUILD_EXECUTABLE)
