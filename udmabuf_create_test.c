@@ -13,6 +13,7 @@
 #include <fcntl.h>
 #include <linux/dma-buf.h>
 #include <linux/udmabuf.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <sys/ioctl.h>
@@ -46,13 +47,13 @@
 //
 // For each path and for each frame, we time drawing the square with the CPU,
 // and we time how long it takes GL to finish rendering.
-//
-// TODO(pwarren): implement the second compositing path that involves an upload.
 
 // Duration to display frames for in seconds.
 static const int kTestCaseDurationSeconds = 20;
 // Name of memfd file created.
 static const char* kMemFDCreateName = "dmabuf_test";
+// Critical value for the standard normal distribution corresponding to a 95% confidence level.
+static const double kZCriticalValue = 1.960;
 
 // Represents a buffer that can be composited into and will be scanned out from.
 struct Buffer {
@@ -77,36 +78,57 @@ struct MotionContext {
 	int y_v;
 };
 
-// Represents a shared-memory buffer that the CPU draws to and the GPU reads from
-// without copies.
-struct ZeroCopySharedMemoryBuffer {
-	struct gbm_bo* image_bo;
-	EGLImageKHR image;
-	GLuint image_texture;
-	GLuint vertex_attributes;
-	int dmabuf_fd;
+struct SharedMemoryBuffer {
 	int memfd;
 	uint32_t* mapped_rgba_data;
+};
+
+// Represents a shared-memory buffer imported into GL.
+// |image_bo|, |image|, and |dmabuf_fd| are only used in the zero-copy path.
+struct ImportedBuffer {
+	GLuint image_texture;
+	struct gbm_bo* image_bo;
+	EGLImageKHR image;
+	int dmabuf_fd;
 };
 
 // Context required for a page flip and memory cleanup when finished.
 struct PageFlipContext {
 	struct BufferQueue queue;
 	struct MotionContext motion_context;
-	struct ZeroCopySharedMemoryBuffer shm_buffer;
+
+	struct SharedMemoryBuffer shm_buffer;
+	struct ImportedBuffer imported_buffer;
+
 	struct bs_egl* egl;
-	int frame;
+	GLuint vertex_attributes;
+	bool use_zero_copy;
+	int frames;
 	uint32_t width;
 	uint32_t height;
 	uint32_t crtc_id;
-	long double sum_of_times;  // Sum of timings on each frame.
+	double sum_of_times;	      // Sum of timings on each frame.
+	double sum_of_squared_times;  // Sum of squared timings on each frame.
 };
 
-// Rounds num up to the nearest multiple of |multiple|.
-uint32_t round_up(uint32_t num, int multiple)
+double standard_error(double stddev, size_t n)
+{
+	return kZCriticalValue * (stddev / sqrt(n));
+}
+
+// Aligns num up to the nearest multiple of |multiple|.
+uint32_t align(uint32_t num, int multiple)
 {
 	assert(multiple);
 	return ((num + multiple - 1) / multiple) * multiple;
+}
+
+/*
+ * Upload pixel data as a GL texture.
+ */
+void upload_texture(uint32_t* arr, size_t width, size_t height)
+{
+	glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, arr);
 }
 
 /*
@@ -114,8 +136,7 @@ uint32_t round_up(uint32_t num, int multiple)
  * behind a black background. Position of the square is set by |motion_context|.
  * |arr| points to the RGBA pixel data.
  */
-void draw_square(size_t width, size_t height, int dmabuf_fd, struct MotionContext* motion_context,
-		 uint32_t* arr)
+void draw_square(size_t width, size_t height, struct MotionContext* motion_context, uint32_t* arr)
 {
 	size_t j_left_bound = motion_context->x;
 	size_t j_right_bound = j_left_bound + 50;
@@ -135,30 +156,12 @@ void draw_square(size_t width, size_t height, int dmabuf_fd, struct MotionContex
 	if (i_top_bound <= 1)
 		motion_context->y_v = 16;
 
-	struct dma_buf_sync sync_start = { 0 };
-
-	sync_start.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW;
-	int rv = HANDLE_EINTR_AND_EAGAIN(ioctl(dmabuf_fd, DMA_BUF_IOCTL_SYNC, &sync_start));
-	if (rv != 0) {
-		bs_debug_error("error with dma_buf start sync");
-		exit(EXIT_FAILURE);
-	}
-
 	uint32_t* dst = (uint32_t*)arr + i_top_bound * width;
 	for (size_t row = i_top_bound; (row < i_bottom_bound) && (row < height); row++) {
 		for (size_t col = j_left_bound; (col < j_right_bound) && (col < width); col++) {
 			dst[col] = color;
 		}
 		dst += width;
-	}
-
-	struct dma_buf_sync sync_end = { 0 };
-
-	sync_end.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW;
-	rv = HANDLE_EINTR_AND_EAGAIN(ioctl(dmabuf_fd, DMA_BUF_IOCTL_SYNC, &sync_end));
-	if (rv != 0) {
-		bs_debug_error("error with dma_buf end sync");
-		exit(EXIT_FAILURE);
 	}
 }
 
@@ -294,9 +297,9 @@ EGLImageKHR import_source_buffer(struct bs_egl* egl, struct gbm_bo* bo, GLuint i
  *   height: height of display
  *
  */
-void init_gl(uint32_t width, uint32_t height, struct ZeroCopySharedMemoryBuffer* buffer)
+GLuint init_gl(struct PageFlipContext* context, uint32_t width, uint32_t height)
 {
-	buffer->vertex_attributes = setup_shaders_and_geometry(width, height);
+	context->vertex_attributes = setup_shaders_and_geometry(width, height);
 
 	GLuint image_texture = 0;
 	glGenTextures(1, &image_texture);
@@ -305,7 +308,7 @@ void init_gl(uint32_t width, uint32_t height, struct ZeroCopySharedMemoryBuffer*
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
 	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-	buffer->image_texture = image_texture;
+	return image_texture;
 }
 
 /*
@@ -332,19 +335,42 @@ static void draw_and_swap_frame(int display_fd, unsigned int frame, unsigned int
 				unsigned int usec, void* data)
 {
 	struct PageFlipContext* context = data;
-	struct BufferQueue queue = context->queue;
-	struct Buffer buf = queue.buffers[queue.back_buffer];
+	struct BufferQueue* queue = &context->queue;
+	struct Buffer buf = queue->buffers[queue->back_buffer];
 	struct bs_egl* egl = context->egl;
-	struct ZeroCopySharedMemoryBuffer shm_buffer = context->shm_buffer;
+	struct SharedMemoryBuffer shm_buffer = context->shm_buffer;
 	int crtc_id = context->crtc_id;
 	uint32_t width = context->width;
 	uint32_t height = context->height;
 	int err;
-
 	struct timespec start, finish;
 	clock_gettime(CLOCK_MONOTONIC, &start);
-	draw_square(width, height, shm_buffer.dmabuf_fd, &context->motion_context,
-		    shm_buffer.mapped_rgba_data);
+	if (context->use_zero_copy) {
+		int dmabuf_fd = context->imported_buffer.dmabuf_fd;
+		struct dma_buf_sync sync_start = { 0 };
+		sync_start.flags = DMA_BUF_SYNC_START | DMA_BUF_SYNC_RW;
+		int rv = HANDLE_EINTR_AND_EAGAIN(ioctl(dmabuf_fd, DMA_BUF_IOCTL_SYNC, &sync_start));
+		if (rv != 0) {
+			bs_debug_error("error with dma_buf start sync");
+			exit(EXIT_FAILURE);
+		}
+
+		draw_square(width, height, &context->motion_context, shm_buffer.mapped_rgba_data);
+
+		struct dma_buf_sync sync_end = { 0 };
+		sync_end.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW;
+		rv = HANDLE_EINTR_AND_EAGAIN(ioctl(dmabuf_fd, DMA_BUF_IOCTL_SYNC, &sync_end));
+		if (rv != 0) {
+			bs_debug_error("error with dma_buf end sync");
+			exit(EXIT_FAILURE);
+		}
+	} else {
+		draw_square(width, height, &context->motion_context, shm_buffer.mapped_rgba_data);
+		// TODO(crbug.com/1069612): Experiment a third path which uses
+		// glTexSubImage2D instead of glTexImage2D() on each frame. It
+		// should be faster.
+		upload_texture(shm_buffer.mapped_rgba_data, width, height);
+	}
 	draw_gl(bs_egl_fb_name(buf.gl_fb));
 	clock_gettime(CLOCK_MONOTONIC, &finish);
 
@@ -353,6 +379,7 @@ static void draw_and_swap_frame(int display_fd, unsigned int frame, unsigned int
 	double ms_to_draw_and_render = (ns_diff)*NS_TO_MS;
 
 	context->sum_of_times += ms_to_draw_and_render;
+	context->sum_of_squared_times += ms_to_draw_and_render * ms_to_draw_and_render;
 
 	bs_egl_image_flush_external(egl, buf.egl_image);
 	err = drmModePageFlip(display_fd, crtc_id, buf.fb_id, DRM_MODE_PAGE_FLIP_EVENT, context);
@@ -362,10 +389,10 @@ static void draw_and_swap_frame(int display_fd, unsigned int frame, unsigned int
 		exit(EXIT_FAILURE);
 	}
 
-	queue.back_buffer = (queue.back_buffer + 1) % 2;
+	queue->back_buffer = (queue->back_buffer + 1) % 2;
 	context->motion_context.x += context->motion_context.x_v;
 	context->motion_context.y += context->motion_context.y_v;
-	context->frame++;
+	context->frames++;
 }
 
 struct BufferQueue init_buffers(struct gbm_device* gbm, struct bs_egl* egl, uint32_t width,
@@ -373,7 +400,6 @@ struct BufferQueue init_buffers(struct gbm_device* gbm, struct bs_egl* egl, uint
 {
 	struct BufferQueue queue;
 	memset(&queue, 0, sizeof(struct BufferQueue));
-
 	for (size_t i = 0; i < 2; i++) {
 		struct gbm_bo* screen_bo = gbm_bo_create(gbm, width, height, GBM_FORMAT_ARGB8888,
 							 GBM_BO_USE_RENDERING | GBM_BO_USE_SCANOUT);
@@ -399,9 +425,7 @@ struct BufferQueue init_buffers(struct gbm_device* gbm, struct bs_egl* egl, uint
 		queue.buffers[i].fb_id = fb_id;
 		queue.buffers[i].gl_fb = create_gl_framebuffer(egl, egl_image);
 	}
-
 	queue.back_buffer = 1;
-
 	return queue;
 }
 
@@ -427,6 +451,8 @@ struct PageFlipContext init_page_flip_context(struct gbm_device* gbm, struct bs_
 	context.motion_context = (struct MotionContext){ 1, 1, 16, 16 };
 	context.queue = init_buffers(gbm, egl, mode->hdisplay, mode->vdisplay);
 	context.sum_of_times = 0;
+	context.sum_of_squared_times = 0;
+	context.frames = 0;
 
 	// Set display mode which also flips the page.
 	int ret_display =
@@ -463,13 +489,21 @@ struct gbm_bo* import_dmabuf(struct gbm_device* gbm, int dmabuf_fd, uint32_t wid
 	return image_bo;
 }
 
-void destroy_shm_buffer(struct ZeroCopySharedMemoryBuffer buf, struct bs_egl* egl, uint32_t length)
+void destroy_shm_buffer(struct SharedMemoryBuffer buf, uint32_t length)
 {
 	munmap(buf.mapped_rgba_data, length);
+	close(buf.memfd);
+}
+
+void destroy_imported_buffer(struct ImportedBuffer buf, struct bs_egl* egl)
+{
 	glDeleteTextures(1, &buf.image_texture);
-	glDeleteBuffers(1, &buf.vertex_attributes);
-	bs_egl_image_destroy(egl, &buf.image);
-	gbm_bo_destroy(buf.image_bo);
+	if (buf.image != EGL_NO_IMAGE_KHR)
+		bs_egl_image_destroy(egl, &buf.image);
+	if (buf.image_bo)
+		gbm_bo_destroy(buf.image_bo);
+	if (buf.dmabuf_fd >= 0)
+		close(buf.dmabuf_fd);
 }
 
 void destroy_buffers(struct BufferQueue queue, struct bs_egl* egl)
@@ -479,6 +513,24 @@ void destroy_buffers(struct BufferQueue queue, struct bs_egl* egl)
 		bs_egl_fb_destroy(&queue.buffers[i].gl_fb);
 		gbm_bo_destroy(queue.buffers[i].bo);
 	}
+}
+
+void print_results(double sum_of_squares, double sum, int frames, bool use_zero_copy)
+{
+	double avg = sum / frames;
+	double stddev = sqrt((sum_of_squares - (frames * (avg * avg))) / (frames - 1));
+	double std_err = standard_error(stddev, frames);
+
+	double begin_range = avg - std_err;
+	double end_range = avg + std_err;
+	if (use_zero_copy)
+		printf("Using udmabuf (zero-copy path):\n");
+	else
+		printf("Using glTexImage2D (one-copy path):\n");
+
+	printf("  n       = %d frames\n", frames);
+	printf("  CI(t)   = (%.2f ms, %.2f ms)\n", begin_range, end_range);
+	printf("  Sum(t)  = %.2f ms\n", sum);
 }
 
 int main(int argc, char** argv)
@@ -503,27 +555,19 @@ int main(int argc, char** argv)
 		bs_debug_error("failed to setup egl context");
 		exit(EXIT_FAILURE);
 	}
+
 	struct PageFlipContext context = init_page_flip_context(gbm, egl, display_fd);
+
 	const uint32_t width = context.width;
 	const uint32_t height = context.height;
-	// udmabuf_create requires a size that is aligned with the page_size.
-	uint32_t length = round_up(width * height * 4, getpagesize());
-
+	uint32_t length = align(width * height * 4, getpagesize());
 	int memfd = create_memfd(length);
-	int dmabuf_fd = create_udmabuf(memfd, length);
 
-	context.frame = 0;
-	context.shm_buffer.dmabuf_fd = dmabuf_fd;
+	context.imported_buffer.image_texture = init_gl(&context, width, height);
 	context.shm_buffer.memfd = memfd;
-	context.shm_buffer.image_bo = import_dmabuf(gbm, dmabuf_fd, width, height);
+
 	context.shm_buffer.mapped_rgba_data =
-	    mmap(NULL, length, PROT_WRITE | PROT_READ, MAP_SHARED, memfd, 0);
-
-	close(memfd);
-
-	init_gl(width, height, &context.shm_buffer);
-	context.shm_buffer.image = import_source_buffer(egl, context.shm_buffer.image_bo,
-							context.shm_buffer.image_texture);
+	    mmap(NULL, length, PROT_WRITE | PROT_READ, MAP_SHARED, context.shm_buffer.memfd, 0);
 
 	draw_and_swap_frame(display_fd, 0, 0, 0, &context);
 
@@ -533,36 +577,59 @@ int main(int argc, char** argv)
 	struct timeval v;
 	drmEventContext ev;
 
-	/* init variables */
-	srand(time(&start));
-	FD_ZERO(&fds);
-	memset(&v, 0, sizeof(v));
-	memset(&ev, 0, sizeof(ev));
-	ev.version = 2;
-	ev.page_flip_handler = draw_and_swap_frame;
+	printf("n         = Number of frames\n");
+	printf(
+	    "CI(t)     = 95%% Z confidence interval for the mean time to draw and composite a "
+	    "frame\n");
+	printf("Sum(t)    = Total drawing and compositing time\n\n");
 
-	// Display for kTestCaseDurationSeconds seconds.
-	while (time(&cur) < start + kTestCaseDurationSeconds) {
-		FD_SET(0, &fds);
-		FD_SET(display_fd, &fds);
-		v.tv_sec = start + kTestCaseDurationSeconds - cur;
+	for (size_t i = 0; i < 2; i++) {
+		context.use_zero_copy = i;
+		context.frames = 0;
+		context.sum_of_times = 0;
+		context.sum_of_squared_times = 0;
 
-		ret = HANDLE_EINTR_AND_EAGAIN(select(display_fd + 1, &fds, NULL, NULL, &v));
-		if (ret < 0) {
-			bs_debug_error("select() failed on page flip: %s", strerror(errno));
-			exit(EXIT_FAILURE);
-		} else if (FD_ISSET(0, &fds)) {
-			fprintf(stderr, "exit due to user-input\n");
-			break;
-		} else if (FD_ISSET(display_fd, &fds)) {
-			drmHandleEvent(display_fd, &ev);
+		if (context.use_zero_copy) {
+			context.imported_buffer.dmabuf_fd = create_udmabuf(memfd, length);
+			context.imported_buffer.image_bo =
+			    import_dmabuf(gbm, context.imported_buffer.dmabuf_fd, width, height);
+
+			context.imported_buffer.image =
+			    import_source_buffer(context.egl, context.imported_buffer.image_bo,
+						 context.imported_buffer.image_texture);
 		}
+		srand(time(&start));
+		FD_ZERO(&fds);
+		memset(&v, 0, sizeof(v));
+		memset(&ev, 0, sizeof(ev));
+		ev.version = 2;
+		ev.page_flip_handler = draw_and_swap_frame;
+
+		// Display for kTestCaseDurationSeconds seconds.
+		while (time(&cur) < start + kTestCaseDurationSeconds) {
+			FD_SET(0, &fds);
+			FD_SET(display_fd, &fds);
+			v.tv_sec = start + kTestCaseDurationSeconds - cur;
+
+			ret = HANDLE_EINTR_AND_EAGAIN(select(display_fd + 1, &fds, NULL, NULL, &v));
+			if (ret < 0) {
+				bs_debug_error("select() failed on page flip: %s", strerror(errno));
+				exit(EXIT_FAILURE);
+			} else if (FD_ISSET(0, &fds)) {
+				fprintf(stderr, "exit due to user-input\n");
+				break;
+			} else if (FD_ISSET(display_fd, &fds)) {
+				drmHandleEvent(display_fd, &ev);
+			}
+		}
+
+		print_results(context.sum_of_squared_times, context.sum_of_times, context.frames,
+			      context.use_zero_copy);
 	}
 
-	printf("Average drawing & compositing time per frame: %LG ms\n",
-	       context.sum_of_times / context.frame);
-
-	destroy_shm_buffer(context.shm_buffer, egl, length);
+	destroy_imported_buffer(context.imported_buffer, egl);
+	destroy_shm_buffer(context.shm_buffer, length);
+	glDeleteBuffers(1, &context.vertex_attributes);
 	destroy_buffers(context.queue, egl);
 	bs_egl_destroy(&egl);
 	gbm_device_destroy(gbm);
