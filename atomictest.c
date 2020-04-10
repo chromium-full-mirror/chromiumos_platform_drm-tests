@@ -169,6 +169,8 @@ struct atomictest_context {
 	drmEventContext drm_event_ctx;
 
 	struct bs_mapper *mapper;
+
+	uint64_t modifier;
 };
 
 typedef int (*test_function)(struct atomictest_context *ctx, struct atomictest_crtc *crtc);
@@ -439,9 +441,14 @@ static int add_plane_fb(struct atomictest_context *ctx, struct atomictest_plane 
 		uint32_t flags = (plane->type.value == DRM_PLANE_TYPE_CURSOR) ? GBM_BO_USE_CURSOR
 									      : GBM_BO_USE_SCANOUT;
 		flags |= GBM_BO_USE_SW_WRITE_RARELY;
-		/* TODO(gsingh): add create with modifiers option. */
-		plane->bo = gbm_bo_create(gbm, plane->crtc_w.value, plane->crtc_h.value,
-					  plane->drm_plane.formats[plane->format_idx], flags);
+		if (ctx->modifier != DRM_FORMAT_MOD_INVALID) {
+			plane->bo = gbm_bo_create_with_modifiers(
+			    gbm, plane->crtc_w.value, plane->crtc_h.value,
+			    plane->drm_plane.formats[plane->format_idx], &(ctx->modifier), 1);
+		} else {
+			plane->bo = gbm_bo_create(gbm, plane->crtc_w.value, plane->crtc_h.value,
+			    plane->drm_plane.formats[plane->format_idx], flags);
+		}
 
 		CHECK(plane->bo);
 		plane->fb_id.value = bs_drm_fb_create_gbm(plane->bo);
@@ -1639,7 +1646,7 @@ static int run_testcase(struct atomictest_context *ctx, struct atomictest_crtc *
 	return ret;
 }
 
-static int run_atomictest(const char *name, uint32_t crtc_mask)
+static int run_atomictest(const char *name, uint32_t crtc_mask, uint64_t modifier)
 {
 	int ret = 0;
 	uint32_t num_run = 0;
@@ -1675,6 +1682,7 @@ static int run_atomictest(const char *name, uint32_t crtc_mask)
 		goto destroy_gbm_device;
 	}
 
+	ctx->modifier = modifier;
 	struct atomictest_crtc *crtc;
 	for (uint32_t crtc_index = 0; crtc_index < ctx->num_crtcs; crtc_index++) {
 		crtc = &ctx->crtcs[crtc_index];
@@ -1720,16 +1728,30 @@ static const struct option longopts[] = {
 	{ "test_name", required_argument, NULL, 't' },
 	{ "help", no_argument, NULL, 'h' },
 	{ "automatic", no_argument, NULL, 'a' },
+	{ "modifier", required_argument, NULL, 'm'},
 	{ 0, 0, 0, 0 },
 };
 
 static void print_help(const char *argv0)
 {
-	printf("usage: %s -t <test_name> -c <crtc_index> -a (if running automatically)\n", argv0);
-	printf("A valid name test is one the following:\n");
+	printf("usage: %s [OPTIONS]\n", argv0);
+	printf("  -t, --test_name <test_name>  name of test to run.\n");
+	printf("  -c, --crtc <crtc_index>      index of crtc to run against.\n");
+	printf("  -a, --automatic              don't sleep between tests.\n");
+	printf("  -m, --modifier <modifier>    pass modifiers.\n");
+	printf(" <test_name> is one the following:\n");
 	for (uint32_t i = 0; i < BS_ARRAY_LEN(cases); i++)
-		printf("%s\n", cases[i].name);
-	printf("all\n");
+		printf("  %s\n", cases[i].name);
+	printf("  all\n");
+
+	int fd = bs_drm_open_main_display();
+	if (fd) {
+		printf(" <modifier> must be one of ");
+		bs_print_supported_modifiers(fd);
+		close(fd);
+	} else {
+		printf("unable to show supported modifiers\n");
+	}
 }
 
 int main(int argc, char **argv)
@@ -1738,7 +1760,8 @@ int main(int argc, char **argv)
 	char *name = NULL;
 	int32_t crtc_idx = -1;
 	uint32_t crtc_mask = ~0;
-	while ((c = getopt_long(argc, argv, "c:t:h:a", longopts, NULL)) != -1) {
+	uint64_t modifier = DRM_FORMAT_MOD_INVALID;
+	while ((c = getopt_long(argc, argv, "c:t:h:am:", longopts, NULL)) != -1) {
 		switch (c) {
 			case 'a':
 				automatic = true;
@@ -1755,6 +1778,13 @@ int main(int argc, char **argv)
 
 				name = strdup(optarg);
 				break;
+			case 'm':
+				modifier = bs_string_to_modifier(optarg);
+				if (modifier == -1) {
+					bs_debug_error("unsupported modifier: %s", optarg);
+					goto print;
+				}
+				break;
 			case 'h':
 				goto print;
 			default:
@@ -1768,7 +1798,7 @@ int main(int argc, char **argv)
 	if (crtc_idx >= 0)
 		crtc_mask = 1 << crtc_idx;
 
-	int ret = run_atomictest(name, crtc_mask);
+	int ret = run_atomictest(name, crtc_mask, modifier);
 	if (ret == 0)
 		printf("[  PASSED  ] atomictest.%s\n", name);
 	else if (ret < 0)
