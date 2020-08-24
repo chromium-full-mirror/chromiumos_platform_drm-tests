@@ -191,7 +191,7 @@ static bool draw_gl(drmModeModeInfo *mode, int fb_idx, int color_idx, GLuint pro
 	return true;
 }
 
-bool check_if_fd_valid(fd)
+bool check_if_fd_valid(int fd)
 {
 	if (fd < 0) {
 		bs_debug_error("fd is not valid.");
