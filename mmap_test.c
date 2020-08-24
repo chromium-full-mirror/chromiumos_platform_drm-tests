@@ -143,8 +143,8 @@ static void draw(struct context *ctx)
 			size_t bo_size = gbm_bo_get_plane_size(fb->bo, 0);
 			const uint32_t width = gbm_bo_get_width(fb->bo);
 			const uint32_t height = gbm_bo_get_height(fb->bo);
-			uint32_t *bo_ptr;
-			volatile uint32_t *ptr;
+			uint32_t *bo_ptr = NULL;
+			volatile uint32_t *ptr = NULL;
 			void *map_data;
 
 			for (sequence_subindex = 0; sequence_subindex < 4; sequence_subindex++) {
