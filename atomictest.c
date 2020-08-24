@@ -18,7 +18,7 @@
 #include <getopt.h>
 #include <inttypes.h>
 #include <pthread.h>
-#include <sync/sync.h>
+#include <libsync.h>
 
 #include "bs_drm.h"
 
@@ -561,7 +561,7 @@ static int scale_plane(struct atomictest_context *ctx, struct atomictest_crtc *c
 	return -1;
 }
 
-static void log(struct atomictest_context *ctx)
+static void log_ctx(struct atomictest_context *ctx)
 {
 	printf("Committing the following configuration: \n");
 	for (uint32_t i = 0; i < ctx->num_crtcs; i++) {
@@ -615,7 +615,7 @@ static int commit(struct atomictest_context *ctx)
 	FD_ZERO(&fds);
 	FD_SET(ctx->fd, &fds);
 
-	log(ctx);
+	log_ctx(ctx);
 	ret = drmModeAtomicCommit(ctx->fd, ctx->pset,
 				  DRM_MODE_PAGE_FLIP_EVENT | DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
 	CHECK_RESULT(ret);
@@ -1140,7 +1140,7 @@ static int test_plane_alpha(struct atomictest_context *ctx, struct atomictest_cr
 
 static void *inc_timeline(void *user_data)
 {
-	int timeline_fd = *(int *)user_data;
+	int timeline_fd = *(intptr_t*)user_data;
 	uint32_t sleep_micro_secs = automatic ? 1e3 : 1e5;
 	usleep(sleep_micro_secs);
 	sw_sync_timeline_inc(timeline_fd, 1);
