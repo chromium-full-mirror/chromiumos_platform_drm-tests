@@ -1696,7 +1696,7 @@ static int run_atomictest(const char *name, uint32_t crtc_mask, uint64_t modifie
 			num_run++;
 			ret = enable_crtc(ctx, crtc);
 			if (ret)
-				goto out;
+				continue;
 
 			ret = run_testcase(ctx, crtc, cases[i].test_func);
 			if (ret < 0)
