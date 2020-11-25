@@ -121,13 +121,11 @@ int create_memfd(size_t length)
 	return fd;
 }
 
-void test_import_dma_buf(int native_fd)
+void test_import_dma_buf(struct gbm_device *gbm)
 {
-	int width = 256;
-	int height = 256;
-	int bpp = 4;
-	int stride = width * bpp;
-	size_t size = stride * height;
+	int width = 64;
+	int height = 64;
+	size_t size = width * height * 4;
 
 	int memfd_fd = create_memfd(size);
 	fail_if(memfd_fd == -1, "failed to create memfd");
@@ -146,54 +144,70 @@ void test_import_dma_buf(int native_fd)
 
 	fail_if(close(memfd_fd) != 0, "close memfd failed");
 
-	uint32_t foreign_imported_handle;
-	fail_if(drmPrimeFDToHandle(native_fd, udmabuf_fd, &foreign_imported_handle) != 0,
-		"drmPrimeFDToHandle failed");
+	struct gbm_import_fd_modifier_data gbm_import_data = {
+		.width = width,
+		.height = height,
+		.format = GBM_FORMAT_ARGB8888,
+		.num_fds = 1,
+		.fds[0] = udmabuf_fd,
+		.strides[0] = width * 4,
+		.offsets[0] = 0,
+		.modifier = DRM_FORMAT_MOD_LINEAR,
+	};
 
-	uint32_t *bo_ptr =
-		mmap_dumb_bo(native_fd, foreign_imported_handle, size);
-	fail_if(bo_ptr == MAP_FAILED,
-		"failed to map imported buffer object\n");
+	struct gbm_bo *bo =
+	    gbm_bo_import(gbm, GBM_BO_IMPORT_FD_MODIFIER,
+			  &gbm_import_data, GBM_BO_USE_RENDERING);
+	fail_if(bo == NULL, "failed to import bo");
 
 	fail_if(close(udmabuf_fd) != 0, "failed to close udmabuf_fd");
 
-	fail_if(!verify_pattern(bo_ptr, size), "pattern mismatch after map");
+	uint32_t stride;
+	void *map_data;
+	void *bo_map = gbm_bo_map(bo,0, 0, width, height,
+				  GBM_BO_TRANSFER_READ, &stride, &map_data);
+
+	fail_if(bo_map == MAP_FAILED, "gbm_bo_map failed");
+
+	fail_if(!verify_pattern(bo_map, size), "pattern mismatch after gbm_bo_map");
+
+	gbm_bo_unmap(bo, map_data);
+
+	gbm_bo_destroy(bo);
 }
 
-void test_export_dma_buf(int native_fd)
+void test_export_dma_buf(struct gbm_device *gbm)
 {
-	struct drm_mode_create_dumb create;
-	uint32_t *bo_ptr;
+	int width = 64;
+	int height = 64;
 
-	memset(&create, 0, sizeof(create));
-	create.width = 640;
-	create.height = 480;
-	create.bpp = 32;
+	struct gbm_bo *bo = gbm_bo_create(gbm, width, height,
+		GBM_FORMAT_ARGB8888, GBM_BO_USE_LINEAR);
+	fail_if(bo == NULL, "create bo failed");
 
-	fail_if(drmIoctl(native_fd, DRM_IOCTL_MODE_CREATE_DUMB, &create) != 0,
-		"failed to create dumb buffer object");
+	uint32_t stride;
+	void *map_data;
+	void *bo_map = gbm_bo_map(bo,0, 0, width, height,
+				  GBM_BO_TRANSFER_WRITE, &stride, &map_data);
+	fail_if(bo_map == MAP_FAILED, "gbm_bo_map failed");
 
-	bo_ptr = mmap_dumb_bo(native_fd, create.handle, create.size);
-	fail_if(bo_ptr == MAP_FAILED, "failed to map dumb bo");
+	fail_if(stride != gbm_bo_get_stride(bo),
+		"mapped buffer stride doesn't match bo stride");
+	uint32_t size = stride * height;
+	write_pattern(bo_map, size);
 
-	write_pattern(bo_ptr, create.size);
+	gbm_bo_unmap(bo, map_data);
 
-	munmap(bo_ptr, create.size);
-
-	int dmabuf_fd;
-	fail_if(drmPrimeHandleToFD(native_fd, create.handle, DRM_CLOEXEC | DRM_RDWR, &dmabuf_fd) != 0,
-		"drmPrimeHandleToFD failed");
+	int dmabuf_fd = gbm_bo_get_fd(bo);
+	fail_if(dmabuf_fd == -1, "dma-buf export failed");
 
 	uint32_t *dmabuf_map =
-	    mmap(NULL, create.size, PROT_WRITE | PROT_READ, MAP_SHARED, dmabuf_fd, 0);
+	    mmap(NULL, size, PROT_WRITE | PROT_READ, MAP_SHARED, dmabuf_fd, 0);
 	fail_if(dmabuf_map == MAP_FAILED, "failed to mmap memfd");
 
-	fail_if(!verify_pattern(dmabuf_map, create.size),
-		"pattern mismatch after gbm_bo_map");
+	fail_if(!verify_pattern(dmabuf_map, size), "pattern mismatch after gbm_bo_map");
 
-	fail_if(munmap(dmabuf_map, create.size) != 0, "munmap failed");
-
-	fail_if(close(dmabuf_fd) != 0, "failed to close dmabuf_fd");
+	fail_if(munmap(dmabuf_map, size) != 0, "munmap failed");
 }
 
 int main(int argc, char *argv[])
@@ -201,10 +215,14 @@ int main(int argc, char *argv[])
 	int fd = bs_drm_open_for_display();
 	fail_if(fd == -1, "error opening dri card");
 
-	test_import_dma_buf(fd);
+	struct gbm_device* gbm = gbm_create_device(fd);
+	fail_if(gbm == NULL, "failed to create gbm device");
 
-	test_export_dma_buf(fd);
+	test_import_dma_buf(gbm);
 
+	test_export_dma_buf(gbm);
+
+	gbm_device_destroy(gbm);
 	close(fd);
 
 	return EXIT_SUCCESS;
