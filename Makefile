@@ -30,6 +30,8 @@ all: \
 	CC_BINARY(synctest) \
 	CC_BINARY(udmabuf_create_test) \
 	CC_BINARY(dmabuf_test) \
+	CC_BINARY(v4l2_stateful_encoder) \
+
 
 ifeq ($(USE_VULKAN),1)
 all: CC_BINARY(vk_glow)
@@ -74,3 +76,5 @@ ifeq ($(USE_VULKAN),1)
 CC_BINARY(vk_glow): vk_glow.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
 CC_BINARY(vk_glow): LDLIBS += -lm -lvulkan $(DRM_LIBS)
 endif
+
+CC_BINARY(v4l2_stateful_encoder): v4l2_stateful_encoder.o
