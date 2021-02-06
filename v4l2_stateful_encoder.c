@@ -242,6 +242,126 @@ int submit_raw_frame_in_bulk(FILE *fp, struct queue *queue, uint32_t index)
 	return 0;
 }
 
+// This function copies the contents pointed by |fp| to |queue|s |index| buffer.
+// It's assumed that
+int submit_raw_frame_row_by_row(FILE *fp, uint32_t file_format, struct queue *queue, uint32_t index)
+{
+	assert(queue->raw_width != queue->encoded_width);
+	assert(queue->num_planes == 1 || queue->num_planes == 2);
+	assert(queue->fourcc == v4l2_fourcc('Y', 'V', '1', '2') ||
+	       queue->fourcc == v4l2_fourcc('N', 'V', '1', '2'));
+	assert(file_format == v4l2_fourcc('Y', 'V', '1', '2') ||
+	       file_format == v4l2_fourcc('N', 'V', '1', '2'));
+
+	struct mmap_buffers *buffers = queue->buffers;
+
+	// Read Y plane first, row by row.
+	uint8_t *buffer = buffers[index].start[0];
+	for (int row = 0; row < queue->raw_height; ++row) {
+		if (fread(buffer, queue->raw_width, 1, fp) != 1) {
+			fprintf(stderr, "unable to read luma row\n");
+			return -1;
+		}
+		buffer += queue->encoded_width;
+	}
+
+	if (queue->num_planes == 2)
+		buffer = buffers[index].start[1];
+	else
+		buffer = buffers[index].start[0] + queue->encoded_width * queue->encoded_height;
+
+	// Now read the U and V planes.
+	if (queue->fourcc == v4l2_fourcc('Y', 'V', '1', '2') &&
+	    file_format == v4l2_fourcc('Y', 'V', '1', '2')) {
+		printf("copying YV12 to YV12\n");
+		for (int row = 0; row < queue->raw_height / 4; ++row) {
+			if (fread(buffer, queue->raw_width, 1, fp) != 1) {
+				fprintf(stderr, "unable to read chroma row\n");
+				return -1;
+			}
+			buffer += queue->encoded_width;
+		}
+
+		if (queue->num_planes == 2) {
+			buffer = buffers[index].start[1] +
+				 queue->encoded_width * queue->encoded_height / 4;
+		} else {
+			buffer = buffers[index].start[0] +
+				 5 * queue->encoded_width * queue->encoded_height / 4;
+		}
+
+		for (int row = 0; row < queue->raw_height / 4; ++row) {
+			if (fread(buffer, queue->raw_width, 1, fp) != 1) {
+				fprintf(stderr, "unable to read chroma row\n");
+				return -1;
+			}
+			buffer += queue->encoded_width;
+		}
+	} else if (queue->fourcc == v4l2_fourcc('N', 'V', '1', '2') &&
+		   file_format == v4l2_fourcc('Y', 'V', '1', '2') && queue->num_planes == 1) {
+		const int kNumPlanes = 2u;
+		for (int plane = 0; plane < kNumPlanes; ++plane) {
+			// Copy all chroma samples from |fp| one by one in even |buffer| positions,
+			// then rewind |buffer|, move it one position right and copy from |fp| into
+			// the odd |buffer| positions.
+			for (int row = 0; row < queue->raw_height / 4; ++row) {
+				for (int col = 0; col < queue->raw_width / 2; ++col) {
+					if (fread(buffer, 1 /*size */, 1 /*nmemb*/, fp) != 1) {
+						fprintf(stderr, "unable to read chroma byte\n");
+						return -1;
+					}
+					buffer += 2;
+				}
+				buffer += queue->encoded_width - queue->raw_width;
+
+				for (int col = 0; col < queue->raw_width / 2; ++col) {
+					if (fread(buffer, 1 /*size */, 1 /*nmemb*/, fp) != 1) {
+						fprintf(stderr, "unable to read chroma byte\n");
+						return -1;
+					}
+					buffer += 2;
+				}
+				buffer += queue->encoded_width - queue->raw_width;
+			}
+			// Rewind |buffer| to start writing the other Chroma samples.
+			buffer -= queue->encoded_width * queue->raw_height / 2;
+			buffer++;		}
+
+	} else {
+		fprintf(
+		    stderr,
+		    "combination of queue format, number of planes, and file format unsupported\n");
+		return -1;
+	}
+
+	struct v4l2_buffer v4l2_buffer;
+	struct v4l2_plane planes[VIDEO_MAX_PLANES];
+	memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
+
+	v4l2_buffer.index = index;
+	v4l2_buffer.type = queue->type;
+	v4l2_buffer.memory = V4L2_MEMORY_MMAP;
+	v4l2_buffer.length = queue->num_planes;
+	v4l2_buffer.timestamp.tv_sec = 0;
+	v4l2_buffer.timestamp.tv_usec = queue->frame_cnt;
+	v4l2_buffer.m.planes = planes;
+	for (uint32_t i = 0; i < queue->num_planes; ++i) {
+		v4l2_buffer.m.planes[i].length = buffers[index].length[i];
+		v4l2_buffer.m.planes[i].bytesused = buffers[index].length[i];
+		v4l2_buffer.m.planes[i].data_offset = 0;
+	}
+
+	int ret = ioctl(queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
+	if (ret != 0) {
+		perror("VIDIOC_QBUF failed");
+		return -1;
+	}
+
+	queue->frame_cnt++;
+
+	return 0;
+}
+
 // This function copies the content of |fp| into the |index|th buffer of
 // |queue|. Depending on |file_format| and the |queue| format, and the raw and
 // encoded sizes of the latter, we might do a copy in bulk or need conversion.
@@ -252,7 +372,7 @@ int submit_raw_frame(FILE *fp, uint32_t file_format, struct queue *queue, uint32
 		return submit_raw_frame_in_bulk(fp, queue, index);
 	}
 
-	return -1;
+	return submit_raw_frame_row_by_row(fp, file_format, queue, index);
 }
 
 void cleanup_queue(struct queue *queue)
