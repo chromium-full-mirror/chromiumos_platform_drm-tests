@@ -4,6 +4,7 @@
  * found in the LICENSE file.
  */
 // https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/dev-encoder.html
+#include <assert.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -181,17 +182,16 @@ int capabilities(int v4lfd, uint32_t OUTPUT_format, uint32_t CAPTURE_format,
 	return ret;
 }
 
-int submit_raw_frame(FILE *fp, struct queue *queue, uint32_t index)
+// This function copies the contents pointed by |fp| tp |queue|s |index| buffer.
+int submit_raw_frame_in_bulk(FILE *fp, struct queue *queue, uint32_t index)
 {
-	struct mmap_buffers *buffers = queue->buffers;
+	assert(queue->num_planes == 1 || queue->num_planes == 2);
+	assert(queue->raw_width == queue->encoded_width);
+	// TODO: the code below assumes NV12 because the Chroma planes are copied in
+	// one call. Extend to YV12 if ever the need arises.
+	assert(queue->fourcc == v4l2_fourcc('N', 'V', '1', '2'));
 
-	// read y plane first
-	if (queue->raw_width != queue->encoded_width) {
-		// This means that the frame will need to be copied over line by line
-		fprintf(stderr, "unable to load raw frame! %d != %d\n", queue->raw_width,
-			queue->encoded_width);
-		return -1;
-	}
+	struct mmap_buffers *buffers = queue->buffers;
 
 	// read y plane first
 	size_t frame_size = queue->raw_width * queue->raw_height;
@@ -206,10 +206,8 @@ int submit_raw_frame(FILE *fp, struct queue *queue, uint32_t index)
 	frame_size >>= 1;
 	if (queue->num_planes == 2)
 		buffer = buffers[index].start[1];
-	else if (queue->num_planes == 1)
-		buffer += queue->encoded_width * queue->encoded_height;
 	else
-		return -1;
+		buffer += queue->encoded_width * queue->encoded_height;
 
 	if (fread(buffer, frame_size, 1, fp) != 1) {
 		fprintf(stderr, "unable to read chroma frame\n");
@@ -242,6 +240,19 @@ int submit_raw_frame(FILE *fp, struct queue *queue, uint32_t index)
 	queue->frame_cnt++;
 
 	return 0;
+}
+
+// This function copies the content of |fp| into the |index|th buffer of
+// |queue|. Depending on |file_format| and the |queue| format, and the raw and
+// encoded sizes of the latter, we might do a copy in bulk or need conversion.
+int submit_raw_frame(FILE *fp, uint32_t file_format, struct queue *queue, uint32_t index)
+{
+	if (queue->raw_width == queue->encoded_width && queue->fourcc == file_format &&
+	    queue->fourcc == v4l2_fourcc('N', 'V', '1', '2')) {
+		return submit_raw_frame_in_bulk(fp, queue, index);
+	}
+
+	return -1;
 }
 
 void cleanup_queue(struct queue *queue)
@@ -602,13 +613,17 @@ int dequeue_buffer(struct queue *queue, uint32_t *index, uint32_t *bytesused, ui
 	return ret;
 }
 
-int encode(FILE *fp_input, struct queue *OUTPUT_queue, struct queue *CAPTURE_queue,
+int encode(FILE *fp_input, uint32_t file_format, struct queue *OUTPUT_queue, struct queue *CAPTURE_queue,
 	   uint32_t frames_to_decode)
 {
 	int ret = 0;
 	char output_file_name[256];
 	int use_ivf = 0;
 
+	if (OUTPUT_queue->num_planes == 0 || OUTPUT_queue->num_planes > 2) {
+		fprintf(stderr, " unsupported number of planes: %d\n", OUTPUT_queue->num_planes);
+		return -1;
+	}
 	fprintf(stderr, "encoding\n");
 
 	if (CAPTURE_queue->fourcc == v4l2_fourcc('V', 'P', '8', '0'))
@@ -644,7 +659,7 @@ int encode(FILE *fp_input, struct queue *OUTPUT_queue, struct queue *CAPTURE_que
 	if (!ret) {
 		// prime input by filling up the OUTPUT queue with raw frames
 		for (uint32_t i = 0; i < OUTPUT_queue->cnt; ++i) {
-			if (submit_raw_frame(fp_input, OUTPUT_queue, i)) {
+			if (submit_raw_frame(fp_input, file_format, OUTPUT_queue, i)) {
 				fprintf(stderr, "unable to submit raw frame\n");
 				ret = 1;
 			}
@@ -705,7 +720,7 @@ int encode(FILE *fp_input, struct queue *OUTPUT_queue, struct queue *CAPTURE_que
 				if (ret != 0)
 					continue;
 
-				if (submit_raw_frame(fp_input, OUTPUT_queue, index))
+				if (submit_raw_frame(fp_input, file_format, OUTPUT_queue, index))
 					break;
 			}
 			cnt++;
@@ -721,7 +736,8 @@ int encode(FILE *fp_input, struct queue *OUTPUT_queue, struct queue *CAPTURE_que
 static void print_help(const char *argv0)
 {
 	printf("usage: %s [OPTIONS]\n", argv0);
-	printf("  -f, --file        nv12 file to encode\n");
+	printf("  -f, --file        file to encode\n");
+	printf("  -i, --file_format pixel format of the file (yv12, nv12)\n");
 	printf("  -w, --width       width of image\n");
 	printf("  -h, --height      height of image\n");
 	printf("  -m, --max         max number of frames to decode\n");
@@ -730,11 +746,12 @@ static void print_help(const char *argv0)
 	printf("  -g, --gop         gop length\n");
 	printf("  -c, --codec       codec\n");
 	printf("  -v, --verbose     verbose capabilities\n");
-	printf("  -i, --buffer_fmt  OUTPUT queue format\n");
+	printf("  -q, --buffer_fmt  OUTPUT queue format\n");
 }
 
 static const struct option longopts[] = {
 	{ "file", required_argument, NULL, 'f' },
+	{ "file_format", required_argument, NULL, 'i' },
 	{ "width", required_argument, NULL, 'w' },
 	{ "height", required_argument, NULL, 'h' },
 	{ "max", required_argument, NULL, 'm' },
@@ -743,12 +760,13 @@ static const struct option longopts[] = {
 	{ "gop", required_argument, NULL, 'g' },
 	{ "codec", required_argument, NULL, 'c' },
 	{ "verbose", no_argument, NULL, 'v' },
-	{ "buffer_fmt", no_argument, NULL, 'i' },
+	{ "buffer_fmt", required_argument, NULL, 'q' },
 	{ 0, 0, 0, 0 },
 };
 
 int main(int argc, char *argv[])
 {
+	uint32_t file_format = v4l2_fourcc('N', 'V', '1', '2');
 	uint32_t OUTPUT_format = v4l2_fourcc('N', 'V', '1', '2');
 	uint32_t CAPTURE_format = v4l2_fourcc('H', '2', '6', '4');
 	char *file_name = NULL;
@@ -767,10 +785,18 @@ int main(int argc, char *argv[])
 				   .header_mode = V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE,
 				   .bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR };
 
-	while ((c = getopt_long(argc, argv, "f:w:h:m:r:b:g:c:vzo:", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "f:i:w:h:m:r:b:g:c:vq:", longopts, NULL)) != -1) {
 		switch (c) {
 			case 'f':
 				file_name = strdup(optarg);
+				break;
+			case 'i':
+				if (strlen(optarg) == 4) {
+					file_format =
+					    v4l2_fourcc(toupper(optarg[0]), toupper(optarg[1]),
+							toupper(optarg[2]), toupper(optarg[3]));
+					printf("using (%s) as the file format\n", optarg);
+				}
 				break;
 			case 'w':
 				width = atoi(optarg);
@@ -801,7 +827,7 @@ int main(int argc, char *argv[])
 			case 'v':
 				verbose_capabilities = 1;
 				break;
-			case 'o':
+			case 'q':
 				if (strlen(optarg) == 4) {
 					OUTPUT_format =
 					    v4l2_fourcc(toupper(optarg[0]), toupper(optarg[1]),
@@ -875,7 +901,7 @@ int main(int argc, char *argv[])
 	}
 
 	if (!ret)
-		ret = encode(fp, &OUTPUT_queue, &CAPTURE_queue, frames_to_decode);
+		ret = encode(fp, file_format, &OUTPUT_queue, &CAPTURE_queue, frames_to_decode);
 
 	cleanup_queue(&OUTPUT_queue);
 	cleanup_queue(&CAPTURE_queue);
