@@ -18,6 +18,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
 
 static const char *kEncodeDevice = "/dev/video-enc";
@@ -776,6 +777,8 @@ int encode(FILE *fp_input, uint32_t file_format, struct queue *OUTPUT_queue, str
 		}
 	}
 
+	struct timespec start, stop;
+	clock_gettime(CLOCK_REALTIME, &start);
 	if (!ret) {
 		// prime input by filling up the OUTPUT queue with raw frames
 		for (uint32_t i = 0; i < OUTPUT_queue->cnt; ++i) {
@@ -798,8 +801,8 @@ int encode(FILE *fp_input, uint32_t file_format, struct queue *OUTPUT_queue, str
 			perror("VIDIOC_STREAMON failed on CAPTURE");
 	}
 
+	uint32_t cnt = OUTPUT_queue->cnt;  // We pre-uploaded a few before.
 	if (!ret) {
-		uint32_t cnt = 0;
 		while (cnt < frames_to_decode) {
 			// handle CAPTURE queue first
 			{
@@ -846,6 +849,11 @@ int encode(FILE *fp_input, uint32_t file_format, struct queue *OUTPUT_queue, str
 			cnt++;
 		}
 	}
+	clock_gettime(CLOCK_REALTIME, &stop);
+	const double elapsed_ns =
+	    (stop.tv_sec - start.tv_sec) * 1e9 + (stop.tv_nsec - start.tv_nsec);
+	const double fps = cnt * 1e9 / elapsed_ns;
+	printf("%d frames encoded in %fns (%ffps)\n", cnt, elapsed_ns, fps);
 
 	if (fp_output) {
 		fclose(fp_output);
