@@ -21,6 +21,7 @@ all: \
 	CC_BINARY(drm_cursor_test) \
 	CC_BINARY(gamma_test) \
 	CC_BINARY(linear_bo_test) \
+	CC_BINARY(mapped_access_perf_test) \
 	CC_BINARY(mapped_texture_test) \
 	CC_BINARY(mmap_test) \
 	CC_BINARY(null_platform_test) \
@@ -82,3 +83,6 @@ CC_BINARY(v4l2_stateful_decoder): v4l2_stateful_decoder.o CC_STATIC_LIBRARY(libb
 CC_BINARY(v4l2_stateful_decoder): LDLIBS += $(DRM_LIBS)
 
 CC_BINARY(v4l2_stateful_encoder): v4l2_stateful_encoder.o
+
+CC_BINARY(mapped_access_perf_test): mapped_access_perf_test.o \
+	CC_STATIC_LIBRARY(libbsdrm.pic.a)
