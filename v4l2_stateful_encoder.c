@@ -873,6 +873,7 @@ static void print_help(const char *argv0)
 	printf("  -b, --bitrate     bits per second\n");
 	printf("  -g, --gop         gop length\n");
 	printf("  -c, --codec       codec\n");
+	printf("  -e, --end_usage   rate control mode: VBR (default), CBR\n");
 	printf("  -v, --verbose     verbose capabilities\n");
 	printf("  -q, --buffer_fmt  OUTPUT queue format\n");
 }
@@ -887,6 +888,7 @@ static const struct option longopts[] = {
 	{ "bitrate", required_argument, NULL, 'b' },
 	{ "gop", required_argument, NULL, 'g' },
 	{ "codec", required_argument, NULL, 'c' },
+	{ "end_usage", required_argument, NULL, 'e' },
 	{ "verbose", no_argument, NULL, 'v' },
 	{ "buffer_fmt", required_argument, NULL, 'q' },
 	{ 0, 0, 0, 0 },
@@ -913,7 +915,7 @@ int main(int argc, char *argv[])
 				   .header_mode = V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE,
 				   .bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR };
 
-	while ((c = getopt_long(argc, argv, "f:i:w:h:m:r:b:g:c:vq:", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "f:i:w:h:m:r:b:g:c:e:vq:", longopts, NULL)) != -1) {
 		switch (c) {
 			case 'f':
 				file_name = strdup(optarg);
@@ -950,6 +952,12 @@ int main(int argc, char *argv[])
 					    v4l2_fourcc(toupper(optarg[0]), toupper(optarg[1]),
 							toupper(optarg[2]), toupper(optarg[3]));
 					printf("using (%s) as the codec\n", optarg);
+				}
+				break;
+			case 'e':
+				if (strlen(optarg) == 3 && toupper(optarg[0]) == 'C' &&
+				    toupper(optarg[1]) == 'B' && toupper(optarg[2]) == 'R') {
+					cfg.bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR;
 				}
 				break;
 			case 'v':
@@ -989,7 +997,9 @@ int main(int argc, char *argv[])
 		fseek(fp, 0, SEEK_SET);
 	}
 
-	fprintf(stderr, "encoding %d frames\n", frames_to_decode);
+	fprintf(stderr, "encoding %d frames using %s bitrate control\n",
+		frames_to_decode,
+		(cfg.bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR) ? "CBR" : "VBR");
 
 	int v4lfd = open(kEncodeDevice, O_RDWR | O_NONBLOCK | O_CLOEXEC);
 	if (v4lfd < 0) {
