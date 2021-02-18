@@ -259,7 +259,6 @@ int submit_raw_frame_in_bulk(FILE *fp, struct queue *queue, uint32_t index)
 // It's assumed that
 int submit_raw_frame_row_by_row(FILE *fp, uint32_t file_format, struct queue *queue, uint32_t index)
 {
-	assert(queue->raw_width != queue->encoded_width);
 	assert(queue->num_planes == 1 || queue->num_planes == 2);
 	assert(queue->fourcc == v4l2_fourcc('Y', 'V', '1', '2') ||
 	       queue->fourcc == v4l2_fourcc('N', 'V', '1', '2'));
