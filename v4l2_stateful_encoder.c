@@ -720,23 +720,19 @@ int dequeue_buffer(struct queue *queue, uint32_t *index, uint32_t *bytesused, ui
 	return ret;
 }
 
-int encode(FILE *fp_input, uint32_t file_format, struct queue *OUTPUT_queue, struct queue *CAPTURE_queue,
+int encode(FILE *fp_input, uint32_t file_format, char* output_file_name, struct queue *OUTPUT_queue, struct queue *CAPTURE_queue,
 	   uint32_t frames_to_decode)
 {
-	int ret = 0;
-	char output_file_name[256];
-	int use_ivf = 0;
-
 	if (OUTPUT_queue->num_planes == 0 || OUTPUT_queue->num_planes > 2) {
 		fprintf(stderr, " unsupported number of planes: %d\n", OUTPUT_queue->num_planes);
 		return -1;
 	}
 	fprintf(stderr, "encoding\n");
 
-	if (CAPTURE_queue->fourcc == v4l2_fourcc('V', 'P', '8', '0'))
-		use_ivf = 1;
+	const int use_ivf = CAPTURE_queue->fourcc == v4l2_fourcc('V', 'P', '8', '0');
+	strcat(output_file_name, use_ivf ? ".ivf" : ".h264");
 
-	sprintf(output_file_name, "output%s", use_ivf ? ".ivf" : ".h264");
+	int ret = 0;
 	FILE *fp_output = fopen(output_file_name, "wb");
 	if (!fp_output) {
 		fprintf(stderr, "unable to write to file: %s\n", output_file_name);
@@ -852,6 +848,7 @@ static void print_help(const char *argv0)
 	printf("usage: %s [OPTIONS]\n", argv0);
 	printf("  -f, --file        file to encode\n");
 	printf("  -i, --file_format pixel format of the file (yv12, nv12)\n");
+	printf("  -o, --output      output file name (will get a .h264 or .ivf suffix added)\n");
 	printf("  -w, --width       width of image\n");
 	printf("  -h, --height      height of image\n");
 	printf("  -m, --max         max number of frames to decode\n");
@@ -867,6 +864,7 @@ static void print_help(const char *argv0)
 static const struct option longopts[] = {
 	{ "file", required_argument, NULL, 'f' },
 	{ "file_format", required_argument, NULL, 'i' },
+	{ "output", required_argument, NULL, 'o' },
 	{ "width", required_argument, NULL, 'w' },
 	{ "height", required_argument, NULL, 'h' },
 	{ "max", required_argument, NULL, 'm' },
@@ -886,6 +884,7 @@ int main(int argc, char *argv[])
 	uint32_t OUTPUT_format = v4l2_fourcc('N', 'V', '1', '2');
 	uint32_t CAPTURE_format = v4l2_fourcc('H', '2', '6', '4');
 	char *file_name = NULL;
+	char *output_file_name = NULL;
 	uint32_t width = 0;
 	uint32_t height = 0;
 	uint32_t frames_to_decode = 0;
@@ -901,7 +900,7 @@ int main(int argc, char *argv[])
 				   .header_mode = V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE,
 				   .bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR };
 
-	while ((c = getopt_long(argc, argv, "f:i:w:h:m:r:b:g:c:e:vq:", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "f:i:o:w:h:m:r:b:g:c:e:vq:", longopts, NULL)) != -1) {
 		switch (c) {
 			case 'f':
 				file_name = strdup(optarg);
@@ -913,6 +912,9 @@ int main(int argc, char *argv[])
 							toupper(optarg[2]), toupper(optarg[3]));
 					printf("using (%s) as the file format\n", optarg);
 				}
+				break;
+			case 'o':
+				output_file_name = strdup(optarg);
 				break;
 			case 'w':
 				width = atoi(optarg);
@@ -963,7 +965,7 @@ int main(int argc, char *argv[])
 		}
 	}
 
-	if (!file_name || width == 0 || height == 0) {
+	if (!file_name || !output_file_name || width == 0 || height == 0) {
 		fprintf(stderr, "Invalid parameters!\n");
 		print_help(argv[0]);
 		exit(1);
@@ -1027,7 +1029,7 @@ int main(int argc, char *argv[])
 	}
 
 	if (!ret)
-		ret = encode(fp, file_format, &OUTPUT_queue, &CAPTURE_queue, frames_to_decode);
+		ret = encode(fp, file_format, output_file_name, &OUTPUT_queue, &CAPTURE_queue, frames_to_decode);
 
 	cleanup_queue(&OUTPUT_queue);
 	cleanup_queue(&CAPTURE_queue);
