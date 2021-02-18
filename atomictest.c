@@ -440,7 +440,7 @@ static int add_plane_fb(struct atomictest_context *ctx, struct atomictest_plane 
 		CHECK_RESULT(remove_plane_fb(ctx, plane));
 		uint32_t flags = (plane->type.value == DRM_PLANE_TYPE_CURSOR) ? GBM_BO_USE_CURSOR
 									      : GBM_BO_USE_SCANOUT;
-		flags |= GBM_BO_USE_SW_WRITE_RARELY;
+		flags |= GBM_BO_USE_LINEAR;
 		if (ctx->modifier != DRM_FORMAT_MOD_INVALID) {
 			plane->bo = gbm_bo_create_with_modifiers(
 			    gbm, plane->crtc_w.value, plane->crtc_h.value,
@@ -497,8 +497,9 @@ static int init_plane_any_format(struct atomictest_context *ctx, struct atomicte
 
 		for (uint32_t format_idx = 0; format_idx < plane->drm_plane.count_formats;
 		     format_idx++) {
-			if (!gbm_device_is_format_supported(
-				gbm, plane->drm_plane.formats[format_idx], GBM_BO_USE_SCANOUT))
+			if (!gbm_device_is_format_supported(gbm,
+							    plane->drm_plane.formats[format_idx],
+							    GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR))
 				continue;
 
 			if (!init_plane(ctx, plane, plane->drm_plane.formats[format_idx], x, y, w,
@@ -652,6 +653,8 @@ static int pageflip_formats(struct atomictest_context *ctx, struct atomictest_cr
 	for (uint32_t i = 0; i < plane->drm_plane.count_formats; i++) {
 		flags = (plane->type.value == DRM_PLANE_TYPE_CURSOR) ? GBM_BO_USE_CURSOR
 								     : GBM_BO_USE_SCANOUT;
+
+		flags |= GBM_BO_USE_LINEAR;
 		if (!gbm_device_is_format_supported(gbm, plane->drm_plane.formats[i], flags))
 			continue;
 
