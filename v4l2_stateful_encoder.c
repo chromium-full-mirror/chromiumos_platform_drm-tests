@@ -44,6 +44,7 @@ struct queue {
 	uint32_t cnt;
 	uint32_t frame_cnt;
 	uint32_t num_planes;
+	uint32_t framerate;
 };
 
 struct encoder_cfg {
@@ -183,6 +184,42 @@ int capabilities(int v4lfd, uint32_t OUTPUT_format, uint32_t CAPTURE_format,
 	return ret;
 }
 
+int queue_OUTPUT_buffer(struct queue *queue, struct mmap_buffers *buffers, uint32_t index)
+{
+	// compute frame timestamp
+	const float usec_per_frame = (1.0 / queue->framerate) * 1000000;
+	const uint64_t usec_time_stamp = usec_per_frame * queue->frame_cnt;
+	const uint64_t tv_sec = usec_time_stamp / 1000000;
+
+	struct v4l2_buffer v4l2_buffer;
+	struct v4l2_plane planes[VIDEO_MAX_PLANES];
+	memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
+
+	v4l2_buffer.index = index;
+	v4l2_buffer.type = queue->type;
+	v4l2_buffer.memory = V4L2_MEMORY_MMAP;
+	v4l2_buffer.length = queue->num_planes;
+	v4l2_buffer.timestamp.tv_sec = tv_sec;
+	v4l2_buffer.timestamp.tv_usec = usec_time_stamp - tv_sec;
+	v4l2_buffer.sequence = queue->frame_cnt;
+	v4l2_buffer.m.planes = planes;
+	for (uint32_t i = 0; i < queue->num_planes; ++i) {
+		v4l2_buffer.m.planes[i].length = buffers[index].length[i];
+		v4l2_buffer.m.planes[i].bytesused = buffers[index].length[i];
+		v4l2_buffer.m.planes[i].data_offset = 0;
+	}
+
+	int ret = ioctl(queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
+	if (ret != 0) {
+		perror("VIDIOC_QBUF failed");
+		return -1;
+	}
+
+	queue->frame_cnt++;
+
+	return 0;
+}
+
 // This function copies the contents pointed by |fp| tp |queue|s |index| buffer.
 int submit_raw_frame_in_bulk(FILE *fp, struct queue *queue, uint32_t index)
 {
@@ -215,32 +252,7 @@ int submit_raw_frame_in_bulk(FILE *fp, struct queue *queue, uint32_t index)
 		return -1;
 	}
 
-	struct v4l2_buffer v4l2_buffer;
-	struct v4l2_plane planes[VIDEO_MAX_PLANES];
-	memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
-
-	v4l2_buffer.index = index;
-	v4l2_buffer.type = queue->type;
-	v4l2_buffer.memory = V4L2_MEMORY_MMAP;
-	v4l2_buffer.length = queue->num_planes;
-	v4l2_buffer.timestamp.tv_sec = 0;
-	v4l2_buffer.timestamp.tv_usec = queue->frame_cnt;
-	v4l2_buffer.m.planes = planes;
-	for (uint32_t i = 0; i < queue->num_planes; ++i) {
-		v4l2_buffer.m.planes[i].length = buffers[index].length[i];
-		v4l2_buffer.m.planes[i].bytesused = buffers[index].length[i];
-		v4l2_buffer.m.planes[i].data_offset = 0;
-	}
-
-	int ret = ioctl(queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
-	if (ret != 0) {
-		perror("VIDIOC_QBUF failed");
-		return -1;
-	}
-
-	queue->frame_cnt++;
-
-	return 0;
+	return queue_OUTPUT_buffer(queue, buffers, index);
 }
 
 // This function copies the contents pointed by |fp| to |queue|s |index| buffer.
@@ -335,32 +347,7 @@ int submit_raw_frame_row_by_row(FILE *fp, uint32_t file_format, struct queue *qu
 		return -1;
 	}
 
-	struct v4l2_buffer v4l2_buffer;
-	struct v4l2_plane planes[VIDEO_MAX_PLANES];
-	memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
-
-	v4l2_buffer.index = index;
-	v4l2_buffer.type = queue->type;
-	v4l2_buffer.memory = V4L2_MEMORY_MMAP;
-	v4l2_buffer.length = queue->num_planes;
-	v4l2_buffer.timestamp.tv_sec = 0;
-	v4l2_buffer.timestamp.tv_usec = queue->frame_cnt;
-	v4l2_buffer.m.planes = planes;
-	for (uint32_t i = 0; i < queue->num_planes; ++i) {
-		v4l2_buffer.m.planes[i].length = buffers[index].length[i];
-		v4l2_buffer.m.planes[i].bytesused = buffers[index].length[i];
-		v4l2_buffer.m.planes[i].data_offset = 0;
-	}
-
-	int ret = ioctl(queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
-	if (ret != 0) {
-		perror("VIDIOC_QBUF failed");
-		return -1;
-	}
-
-	queue->frame_cnt++;
-
-	return 0;
+	return queue_OUTPUT_buffer(queue, buffers, index);
 }
 
 // This function copies the content of |fp| into the |index|th buffer of
@@ -459,7 +446,7 @@ int queue_CAPTURE_buffer(struct queue *queue, uint32_t index)
 }
 
 // 4.5.2.5. Initialization
-int Initialization(struct queue *OUTPUT_queue, struct queue *CAPTURE_queue, uint32_t framerate)
+int Initialization(struct queue *OUTPUT_queue, struct queue *CAPTURE_queue)
 {
 	int ret = 0;
 
@@ -512,7 +499,7 @@ int Initialization(struct queue *OUTPUT_queue, struct queue *CAPTURE_queue, uint
 		// Note that we are provided "frames per second" but V4L2 expects "time per
 		// frame"; hence we provide the reciprocal of the framerate here.
 		parms.parm.output.timeperframe.numerator = 1;
-		parms.parm.output.timeperframe.denominator = framerate;
+		parms.parm.output.timeperframe.denominator = OUTPUT_queue->framerate;
 
 		ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_PARM, &parms);
 		if (ret != 0)
@@ -884,7 +871,7 @@ static const struct option longopts[] = {
 	{ "width", required_argument, NULL, 'w' },
 	{ "height", required_argument, NULL, 'h' },
 	{ "max", required_argument, NULL, 'm' },
-	{ "rate", required_argument, NULL, 'r' },
+	{ "fps", required_argument, NULL, 'r' },
 	{ "bitrate", required_argument, NULL, 'b' },
 	{ "gop", required_argument, NULL, 'g' },
 	{ "codec", required_argument, NULL, 'c' },
@@ -1018,16 +1005,18 @@ int main(int argc, char *argv[])
 				      .raw_width = width,
 				      .raw_height = height,
 				      .frame_cnt = 0,
-				      .num_planes = 1 };
+				      .num_planes = 1,
+				      .framerate = framerate };
 
 	struct queue CAPTURE_queue = { .v4lfd = v4lfd,
 				       .type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
 				       .fourcc = CAPTURE_format,
 				       .raw_width = width,
 				       .raw_height = height,
-				       .num_planes = 1 };
+				       .num_planes = 1,
+				       .framerate = framerate };
 
-	int ret = Initialization(&OUTPUT_queue, &CAPTURE_queue, framerate);
+	int ret = Initialization(&OUTPUT_queue, &CAPTURE_queue);
 
 	// not all configurations are supported, so we don't need to track
 	// the return value
