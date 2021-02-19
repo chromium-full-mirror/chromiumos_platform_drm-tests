@@ -446,8 +446,9 @@ static int add_plane_fb(struct atomictest_context *ctx, struct atomictest_plane 
 			    gbm, plane->crtc_w.value, plane->crtc_h.value,
 			    plane->drm_plane.formats[plane->format_idx], &(ctx->modifier), 1);
 		} else {
-			plane->bo = gbm_bo_create(gbm, plane->crtc_w.value, plane->crtc_h.value,
-			    plane->drm_plane.formats[plane->format_idx], flags);
+			plane->bo =
+			    gbm_bo_create(gbm, plane->crtc_w.value, plane->crtc_h.value,
+					  plane->drm_plane.formats[plane->format_idx], flags);
 		}
 
 		CHECK(plane->bo);
@@ -1099,9 +1100,8 @@ static int test_plane_alpha(struct atomictest_context *ctx, struct atomictest_cr
 		if (!primary->alpha.pid)
 			return 0;
 
-		CHECK_RESULT(init_plane_any_format(
-			ctx, primary, 0, 0, crtc->width, crtc->height,
-						crtc->crtc_id, false));
+		CHECK_RESULT(init_plane_any_format(ctx, primary, 0, 0, crtc->width, crtc->height,
+						   crtc->crtc_id, false));
 		CHECK_RESULT(draw_to_plane(ctx->mapper, primary, DRAW_ELLIPSE));
 		primary->alpha.value = 0xffff;
 		set_plane_props(primary, ctx->pset);
@@ -1113,9 +1113,8 @@ static int test_plane_alpha(struct atomictest_context *ctx, struct atomictest_cr
 				return 0;
 
 			CHECK_RESULT(init_plane_any_format(
-				ctx, overlay, offset_x, offset_y,
-				crtc->width - offset_x * 2, crtc->height - offset_y * 2,
-						crtc->crtc_id, false));
+			    ctx, overlay, offset_x, offset_y, crtc->width - offset_x * 2,
+			    crtc->height - offset_y * 2, crtc->crtc_id, false));
 			CHECK_RESULT(draw_to_plane(ctx->mapper, overlay, DRAW_STRIPE));
 			ret |= test_and_commit(ctx, 1e6 / 2);
 
@@ -1171,8 +1170,7 @@ static int test_in_fence(struct atomictest_context *ctx, struct atomictest_crtc 
 	set_plane_props(primary, ctx->pset);
 	set_crtc_props(crtc, ctx->pset);
 
-	CHECK(
-	    !pthread_create(&inc_timeline_thread, NULL, inc_timeline, &timeline));
+	CHECK(!pthread_create(&inc_timeline_thread, NULL, inc_timeline, &timeline));
 
 	ret |= test_and_commit(ctx, 1e6);
 	CHECK(!pthread_join(inc_timeline_thread, NULL));
@@ -1574,7 +1572,7 @@ static int test_crtc_gamma(struct atomictest_context *ctx, struct atomictest_crt
 
 static inline uint64_t pack_rgba_64(uint64_t red, uint64_t green, uint64_t blue, uint64_t alpha)
 {
-	return alpha << 48 | blue  << 32 | green << 16 | red;
+	return alpha << 48 | blue << 32 | green << 16 | red;
 }
 
 static int test_crtc_background_color(struct atomictest_context *ctx, struct atomictest_crtc *crtc)
@@ -1590,10 +1588,10 @@ static int test_crtc_background_color(struct atomictest_context *ctx, struct ato
 	};
 
 	const struct crtc_background_color colors[] = {
-		{"black",  pack_rgba_64(     0,      0,      0, 0xffff)},
-		{"red",    pack_rgba_64(0xffff,      0,      0, 0xffff)},
-		{"green",  pack_rgba_64(     0, 0xffff,      0, 0xffff)},
-		{"blue",   pack_rgba_64(     0,      0, 0xffff, 0xffff)},
+		{ "black", pack_rgba_64(0, 0, 0, 0xffff) },
+		{ "red", pack_rgba_64(0xffff, 0, 0, 0xffff) },
+		{ "green", pack_rgba_64(0, 0xffff, 0, 0xffff) },
+		{ "blue", pack_rgba_64(0, 0, 0xffff, 0xffff) },
 	};
 
 	for (int i = 0; i < BS_ARRAY_LEN(colors); i++) {
@@ -1724,12 +1722,9 @@ destroy_fd:
 }
 
 static const struct option longopts[] = {
-	{ "crtc", required_argument, NULL, 'c' },
-	{ "test_name", required_argument, NULL, 't' },
-	{ "help", no_argument, NULL, 'h' },
-	{ "automatic", no_argument, NULL, 'a' },
-	{ "modifier", required_argument, NULL, 'm'},
-	{ 0, 0, 0, 0 },
+	{ "crtc", required_argument, NULL, 'c' },     { "test_name", required_argument, NULL, 't' },
+	{ "help", no_argument, NULL, 'h' },	      { "automatic", no_argument, NULL, 'a' },
+	{ "modifier", required_argument, NULL, 'm' }, { 0, 0, 0, 0 },
 };
 
 static void print_help(const char *argv0)
