@@ -21,7 +21,7 @@
 #include <time.h>
 #include <unistd.h>
 
-static const char *kEncodeDevice = "/dev/video-enc";
+static const char *kEncodeDevice = "/dev/video-enc0";
 static const int kInputbufferMaxSize = 4 * 1024 * 1024;
 static const int kRequestBufferCount = 8;
 static const uint32_t kIVFHeaderSignature = v4l2_fourcc('D', 'K', 'I', 'F');
