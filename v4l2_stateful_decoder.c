@@ -441,42 +441,37 @@ int setup_CAPTURE(struct gbm_device* gbm,
   return ret;
 }
 
-void write_file_to_disk(struct queue* CAPTURE_queue,
+void write_file_to_disk(FILE* fp,
+                        struct queue* CAPTURE_queue,
                         uint32_t index,
                         uint32_t cnt) {
-  char filename[256];
-  sprintf(filename, "image_%dx%d_%d.yuv", CAPTURE_queue->image_width,
-          CAPTURE_queue->image_height, cnt);
-  FILE* fp = fopen(filename, "wb");
-  if (fp) {
-    if (V4L2_MEMORY_DMABUF == CAPTURE_queue->memory) {
-      struct gbm_bo* bo = CAPTURE_queue->buffers[index].bo;
-      int bo_fd = gbm_bo_get_fd(bo);
-      size_t buffer_size = lseek(bo_fd, 0, SEEK_END);
-      lseek(bo_fd, 0, SEEK_SET);
+  if (V4L2_MEMORY_DMABUF == CAPTURE_queue->memory) {
+    struct gbm_bo* bo = CAPTURE_queue->buffers[index].bo;
+    int bo_fd = gbm_bo_get_fd(bo);
+    size_t buffer_size = lseek(bo_fd, 0, SEEK_END);
+    lseek(bo_fd, 0, SEEK_SET);
 
-      uint8_t* buffer = mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
+    uint8_t* buffer = mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
+
+    fwrite(buffer, buffer_size, 1, fp);
+
+    munmap(buffer, buffer_size);
+  } else {
+    if (CAPTURE_queue->num_planes == 1) {
+      size_t buffer_size =
+          (3 * CAPTURE_queue->image_width * CAPTURE_queue->image_height) >> 1;
+      uint8_t* buffer = CAPTURE_queue->buffers[index].start[0];
 
       fwrite(buffer, buffer_size, 1, fp);
-      munmap(buffer, buffer_size);
     } else {
-      if (CAPTURE_queue->num_planes == 1) {
+      for (uint32_t i = 0; i < CAPTURE_queue->num_planes; ++i) {
         size_t buffer_size =
-            (3 * CAPTURE_queue->image_width * CAPTURE_queue->image_height) >> 1;
-        uint8_t* buffer = CAPTURE_queue->buffers[index].start[0];
+            (CAPTURE_queue->image_width * CAPTURE_queue->image_height) >> i;
+        uint8_t* buffer = CAPTURE_queue->buffers[index].start[i];
+
         fwrite(buffer, buffer_size, 1, fp);
-      } else {
-        for (uint32_t i = 0; i < CAPTURE_queue->num_planes; ++i) {
-          size_t buffer_size =
-              (CAPTURE_queue->image_width * CAPTURE_queue->image_height) >> i;
-          uint8_t* buffer = CAPTURE_queue->buffers[index].start[i];
-          fwrite(buffer, buffer_size, 1, fp);
-        }
       }
     }
-    fclose(fp);
-  } else {
-    fprintf(stderr, "Unable to open file: %s\n", filename);
   }
 }
 
@@ -498,12 +493,31 @@ int decode(struct compressed_file* file,
            struct queue* CAPTURE_queue,
            struct queue* OUTPUT_queue,
            uint64_t modifier,
-           bool write_out,
+           bool write_out_individual_frames,
+           bool write_out_file,
+           char* file_name,
            uint32_t frames_to_decode) {
   int ret = 0;
 
   if (!ret) {
     uint32_t cnt = 0;
+
+    FILE* fp_frame;
+    FILE* fp_file;
+    char filename_frame[256];
+
+    if (write_out_file) {
+      // replace .ivf with .yuv
+      strcpy(strrchr(file_name, '.'), ".yuv");
+
+      fp_file = fopen(file_name, "wb");
+
+      if (!fp_file) {
+        fprintf(stderr, "Unable to open output yuv file: %s\n", file_name);
+        return 1;
+      }
+    }
+
     while (cnt < frames_to_decode) {
       {
         uint32_t index = 0;
@@ -514,8 +528,24 @@ int decode(struct compressed_file* file,
           continue;
         }
 
-        if (write_out)
-          write_file_to_disk(CAPTURE_queue, index, cnt);
+        if (write_out_individual_frames) {
+          sprintf(filename_frame, "image_%dx%d_%d.yuv",
+                  CAPTURE_queue->image_width, CAPTURE_queue->image_height, cnt);
+          fp_frame = fopen(filename_frame, "wb");
+
+          if (!fp_frame) {
+            fprintf(stderr, "Unable to open frame yuv file: %s\n",
+                    filename_frame);
+            ret = 1;
+            break;
+          } else {
+            write_file_to_disk(fp_frame, CAPTURE_queue, index, cnt);
+          }
+        }
+
+        if (write_out_file) {
+          write_file_to_disk(fp_file, CAPTURE_queue, index, cnt);
+        }
 
         // Done with buffer, queue it back up.
         ret = queue_buffer_CAPTURE(CAPTURE_queue, index);
@@ -536,7 +566,14 @@ int decode(struct compressed_file* file,
           break;
       }
       cnt++;
+
+      if (write_out_individual_frames)
+        fclose(fp_frame);
     }
+
+    if (write_out_file)
+      fclose(fp_file);
+
     printf("%d frames decoded.\n", cnt);
   }
 
@@ -546,28 +583,37 @@ int decode(struct compressed_file* file,
 static void print_help(const char* argv0) {
   printf("usage: %s [OPTIONS]\n", argv0);
   printf("  -f, --file        ivf file to decode\n");
-  printf("  -w, --write       write out decompressed frames\n");
+  printf(
+      "  -w, --write       write out decompressed frames to individual "
+      "files\n");
+  printf(
+      "  -y, --output_yuv  write out decompressed frames to a single file\n");
   printf("  -m, --max         max number of frames to decode\n");
   printf("  -b, --buffer      use mmap instead of dmabuf\n");
   printf("  -o, --output_fmt  fourcc of output format\n");
 }
 
 static const struct option longopts[] = {
-    {"file", required_argument, NULL, 'f'}, {"write", no_argument, NULL, 'w'},
-    {"max", required_argument, NULL, 'm'},  {"buffer", no_argument, NULL, 'b'},
-    {"output_fmt", no_argument, NULL, 'o'}, {0, 0, 0, 0},
+    {"file", required_argument, NULL, 'f'},
+    {"write", no_argument, NULL, 'w'},
+    {"output_yuv", no_argument, NULL, 'y'},
+    {"max", required_argument, NULL, 'm'},
+    {"buffer", no_argument, NULL, 'b'},
+    {"output_fmt", no_argument, NULL, 'o'},
+    {0, 0, 0, 0},
 };
 
 int main(int argc, char* argv[]) {
   printf("simple v4l2 decode\n");
   int c;
   char* file_name = NULL;
-  bool write_out = false;
+  bool write_out_individual_frames = false;
+  bool write_out_file = false;
   uint32_t frames_to_decode = UINT_MAX;
   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
   uint32_t uncompressed_fourcc = v4l2_fourcc('N', 'V', '1', '2');
   uint32_t CAPTURE_memory = V4L2_MEMORY_DMABUF;
-  while ((c = getopt_long(argc, argv, "wbm:f:o:", longopts, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "wybm:f:o:", longopts, NULL)) != -1) {
     switch (c) {
       case 'f':
         file_name = strdup(optarg);
@@ -577,7 +623,10 @@ int main(int argc, char* argv[]) {
         printf("only decoding a max of %d frames.\n", frames_to_decode);
         break;
       case 'w':
-        write_out = true;
+        write_out_individual_frames = true;
+        break;
+      case 'y':
+        write_out_file = true;
         break;
       case 'b':
         CAPTURE_memory = V4L2_MEMORY_MMAP;
@@ -655,7 +704,8 @@ int main(int argc, char* argv[]) {
 
   if (!ret)
     ret = decode(&compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
-                 write_out, frames_to_decode);
+                 write_out_individual_frames, write_out_file, file_name,
+                 frames_to_decode);
 
   cleanup_queue(&OUTPUT_queue);
   cleanup_queue(&CAPTURE_queue);
