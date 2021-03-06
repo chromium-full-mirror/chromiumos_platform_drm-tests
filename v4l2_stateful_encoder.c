@@ -45,6 +45,7 @@ struct queue {
   uint32_t frame_cnt;
   uint32_t num_planes;
   uint32_t framerate;
+  uint32_t strides[VIDEO_MAX_PLANES];
 };
 
 struct encoder_cfg {
@@ -256,16 +257,15 @@ int submit_raw_frame_in_bulk(FILE* fp, struct queue* queue, uint32_t index) {
 }
 
 // This function copies the contents pointed by |fp| to |queue|s |index| buffer.
-// It's assumed that
 int submit_raw_frame_row_by_row(FILE* fp,
                                 uint32_t file_format,
                                 struct queue* queue,
                                 uint32_t index) {
-  assert(queue->num_planes == 1 || queue->num_planes == 2);
+  assert(queue->num_planes == 1 || queue->num_planes == 3);
   assert(queue->fourcc == v4l2_fourcc('Y', 'V', '1', '2') ||
+         queue->fourcc == v4l2_fourcc('Y', 'M', '1', '2') ||
          queue->fourcc == v4l2_fourcc('N', 'V', '1', '2'));
-  assert(file_format == v4l2_fourcc('Y', 'V', '1', '2') ||
-         file_format == v4l2_fourcc('N', 'V', '1', '2'));
+  assert(file_format == v4l2_fourcc('Y', 'V', '1', '2'));
 
   struct mmap_buffers* buffers = queue->buffers;
 
@@ -279,69 +279,76 @@ int submit_raw_frame_row_by_row(FILE* fp,
     buffer += queue->encoded_width;
   }
 
-  if (queue->num_planes == 2)
-    buffer = buffers[index].start[1];
-  else
-    buffer =
-        buffers[index].start[0] + queue->encoded_width * queue->encoded_height;
-
   // Now read the U and V planes.
-  if (queue->fourcc == v4l2_fourcc('Y', 'V', '1', '2') &&
+  if ((queue->fourcc == v4l2_fourcc('Y', 'V', '1', '2') ||
+       queue->fourcc == v4l2_fourcc('Y', 'M', '1', '2')) &&
       file_format == v4l2_fourcc('Y', 'V', '1', '2')) {
-    printf("copying YV12 to YV12\n");
-    for (int row = 0; row < queue->raw_height / 4; ++row) {
-      if (fread(buffer, queue->raw_width, 1, fp) != 1) {
-        fprintf(stderr, "unable to read chroma row\n");
+    assert((queue->fourcc == v4l2_fourcc('Y', 'M', '1', '2') &&
+            queue->num_planes == 3) ||
+           (queue->fourcc == v4l2_fourcc('Y', 'V', '1', '2') &&
+            queue->num_planes == 1));
+
+    buffer = buffers[index].start[1];
+    const uint32_t stride_u = queue->strides[1];
+
+    for (int row = 0; row < queue->raw_height / 2; ++row) {
+      if (fread(buffer, queue->raw_width / 2, 1, fp) != 1) {
+        fprintf(stderr, "unable to read chroma v row\n");
         return -1;
       }
-      buffer += queue->encoded_width;
+      buffer += stride_u;
     }
 
-    if (queue->num_planes == 2) {
-      buffer = buffers[index].start[1] +
-               queue->encoded_width * queue->encoded_height / 4;
+    uint32_t stride_v = stride_u;
+    if (queue->num_planes == 3) {
+      buffer = buffers[index].start[2];
+      stride_v = queue->strides[2];
     } else {
+      assert(queue->num_planes == 1);
       buffer = buffers[index].start[0] +
                5 * queue->encoded_width * queue->encoded_height / 4;
     }
 
-    for (int row = 0; row < queue->raw_height / 4; ++row) {
-      if (fread(buffer, queue->raw_width, 1, fp) != 1) {
-        fprintf(stderr, "unable to read chroma row\n");
+    for (int row = 0; row < queue->raw_height / 2; ++row) {
+      if (fread(buffer, queue->raw_width / 2, 1, fp) != 1) {
+        fprintf(stderr, "unable to read chroma u row\n");
         return -1;
       }
-      buffer += queue->encoded_width;
+      buffer += stride_v;
     }
+
   } else if (queue->fourcc == v4l2_fourcc('N', 'V', '1', '2') &&
              file_format == v4l2_fourcc('Y', 'V', '1', '2') &&
              queue->num_planes == 1) {
+    assert(queue->num_planes == 1);
+
+    // Copy all chroma samples from |fp| one by one in even |buffer| positions,
+    // then on the second loop iteration, move |buffer| one position right and
+    // copy from |fp| into the odd |buffer| positions.
     const int kNumPlanes = 2u;
     for (int plane = 0; plane < kNumPlanes; ++plane) {
-      // Copy all chroma samples from |fp| one by one in even |buffer|
-      // positions, then rewind |buffer|, move it one position right and copy
-      // from |fp| into the odd |buffer| positions.
+      buffer = buffers[index].start[0] +
+               queue->encoded_width * queue->encoded_height + plane;
+      const uint32_t row_padding = queue->encoded_width - queue->raw_width;
       for (int row = 0; row < queue->raw_height / 4; ++row) {
         for (int col = 0; col < queue->raw_width / 2; ++col) {
           if (fread(buffer, 1 /*size */, 1 /*nmemb*/, fp) != 1) {
-            fprintf(stderr, "unable to read chroma byte\n");
+            fprintf(stderr, "unable to read chroma v byte\n");
             return -1;
           }
           buffer += 2;
         }
-        buffer += queue->encoded_width - queue->raw_width;
+        buffer += row_padding;
 
         for (int col = 0; col < queue->raw_width / 2; ++col) {
           if (fread(buffer, 1 /*size */, 1 /*nmemb*/, fp) != 1) {
-            fprintf(stderr, "unable to read chroma byte\n");
+            fprintf(stderr, "unable to read chroma u byte\n");
             return -1;
           }
           buffer += 2;
         }
-        buffer += queue->encoded_width - queue->raw_width;
+        buffer += row_padding;
       }
-      // Rewind |buffer| to start writing the other Chroma samples.
-      buffer -= queue->encoded_width * queue->raw_height / 2;
-      buffer++;
     }
 
   } else {
@@ -493,6 +500,14 @@ int Initialization(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
     OUTPUT_queue->encoded_height = fmt.fmt.pix_mp.height;
 
     OUTPUT_queue->num_planes = fmt.fmt.pix_mp.num_planes;
+    assert(OUTPUT_queue->num_planes <= VIDEO_MAX_PLANES);
+    printf("OUTPUT_queue %d planes, (%dx%d)\n", OUTPUT_queue->num_planes,
+           OUTPUT_queue->encoded_width, OUTPUT_queue->encoded_height);
+    for (int plane = 0; plane < OUTPUT_queue->num_planes; ++plane) {
+      OUTPUT_queue->strides[plane] =
+          fmt.fmt.pix_mp.plane_fmt[plane].bytesperline;
+      printf(" plane %d, stride %d\n", plane, OUTPUT_queue->strides[plane]);
+    }
   }
 
   // 4. Set the raw frame interval on the OUTPUT queue via VIDIOC_S_PARM()
@@ -738,7 +753,7 @@ int encode(FILE* fp_input,
            struct queue* OUTPUT_queue,
            struct queue* CAPTURE_queue,
            uint32_t frames_to_decode) {
-  if (OUTPUT_queue->num_planes == 0 || OUTPUT_queue->num_planes > 2) {
+  if (OUTPUT_queue->num_planes == 0 || OUTPUT_queue->num_planes > 3) {
     fprintf(stderr, " unsupported number of planes: %d\n",
             OUTPUT_queue->num_planes);
     return -1;
@@ -970,7 +985,7 @@ int main(int argc, char* argv[]) {
         if (strlen(optarg) == 4) {
           OUTPUT_format = v4l2_fourcc(toupper(optarg[0]), toupper(optarg[1]),
                                       toupper(optarg[2]), toupper(optarg[3]));
-          printf("using (%s) as the OUTPUT queue buffer format\n", optarg);
+          printf("using (%s) as the OUTPUT_queue buffer format\n", optarg);
         }
         break;
       default:
@@ -1042,9 +1057,14 @@ int main(int argc, char* argv[]) {
       configure_h264(v4lfd, &cfg);
   }
 
-  if (!ret)
+  if (!ret) {
     ret = encode(fp, file_format, output_file_name, &OUTPUT_queue,
                  &CAPTURE_queue, frames_to_decode);
+  }
+
+  // On kukui (MTK8183), removing this sleep() causes a hard crash.
+  // TODO(b/182200028): Investigate why and remove it.
+  sleep(1);
 
   cleanup_queue(&OUTPUT_queue);
   cleanup_queue(&CAPTURE_queue);
