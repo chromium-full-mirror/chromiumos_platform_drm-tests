@@ -48,15 +48,15 @@ struct queue {
   uint32_t strides[VIDEO_MAX_PLANES];
 };
 
-struct encoder_cfg {
-  uint32_t gop_size;
-  uint32_t bitrate;
-  enum v4l2_mpeg_video_h264_entropy_mode h264_entropy_mode;
-  enum v4l2_mpeg_video_h264_level h264_level;
-  enum v4l2_mpeg_video_h264_profile h264_profile;
-  enum v4l2_mpeg_video_header_mode header_mode;
-  enum v4l2_mpeg_video_bitrate_mode bitrate_mode;
+struct encoder_control {
+  uint32_t id;
+  uint32_t value;
+  uint32_t enabled;
+  char *name;
 };
+
+#define ENCODER_CTL(ID, VALUE) \
+  {.id = ID, .value = VALUE, .enabled = 1, .name = #ID}
 
 struct ivf_file_header {
   uint32_t signature;
@@ -589,135 +589,117 @@ int Initialization(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
   return ret;
 }
 
-int configure_h264(int v4lfd, struct encoder_cfg* cfg) {
-  int ret = 0;
-  const int kH264CtrlCnt = 4;
+void disable_unsupported_controls(int v4lfd,
+                                  struct encoder_control* encoder_ctrl) {
+  while (encoder_ctrl->id != 0) {
+    struct v4l2_query_ext_ctrl query_ext_ctrl;
+    memset(&query_ext_ctrl, 0, sizeof(query_ext_ctrl));
 
-  struct v4l2_ext_control ext_ctrl[kH264CtrlCnt];
-  memset(&ext_ctrl, 0, sizeof(ext_ctrl));
+    query_ext_ctrl.id = V4L2_CTRL_CLASS_MPEG | encoder_ctrl->id;
 
-  ext_ctrl[0].id = V4L2_CID_MPEG_VIDEO_H264_PROFILE;
-  ext_ctrl[0].value = cfg->h264_profile;
+    int ret = ioctl(v4lfd, VIDIOC_QUERY_EXT_CTRL, &query_ext_ctrl);
 
-  ext_ctrl[1].id = V4L2_CID_MPEG_VIDEO_H264_LEVEL;
-  ext_ctrl[1].value = cfg->h264_level;
+    encoder_ctrl->enabled = (ret == 0);
 
-  ext_ctrl[2].id = V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE;
-  ext_ctrl[2].value = cfg->h264_entropy_mode;
+    if (ret != 0) {
+      fprintf(stderr,
+        "%s control does not exist on this platform\n" , encoder_ctrl->name);
+    }
 
-  ext_ctrl[3].id = V4L2_CID_MPEG_VIDEO_HEADER_MODE;
-  ext_ctrl[3].value = cfg->header_mode;
-
-  struct v4l2_ext_controls ext_ctrls;
-  memset(&ext_ctrls, 0, sizeof(ext_ctrls));
-
-  ext_ctrls.ctrl_class = V4L2_CTRL_CLASS_MPEG;
-  ext_ctrls.count = kH264CtrlCnt;
-  ext_ctrls.controls = ext_ctrl;
-
-  ret = ioctl(v4lfd, VIDIOC_S_EXT_CTRLS, &ext_ctrls);
-
-  if (ret != 0)
-    perror("VIDIOC_S_EXT_CTRLS failed");
-
-  for (uint32_t i = 0; i < kH264CtrlCnt; ++i)
-    ext_ctrl[i].value = 0;
-
-  ret = ioctl(v4lfd, VIDIOC_G_EXT_CTRLS, &ext_ctrls);
-  if (ret != 0)
-    perror("VIDIOC_G_EXT_CTRLS failed");
-
-  if (ext_ctrl[0].value != cfg->h264_profile)
-    fprintf(stderr, "requested profile(%d) was not used, using (%d) instead.\n",
-            cfg->h264_profile, ext_ctrl[0].value);
-
-  if (ext_ctrl[1].value != cfg->h264_level)
-    fprintf(stderr, "requested level(%d) was not used, using (%d) instead.\n",
-            cfg->h264_level, ext_ctrl[1].value);
-
-  if (ext_ctrl[2].value != cfg->h264_entropy_mode)
-    fprintf(stderr,
-            "requested entropy mode(%d) was not used, using (%d) instead.\n",
-            cfg->h264_entropy_mode, ext_ctrl[2].value);
-
-  if (ext_ctrl[3].value != cfg->header_mode)
-    fprintf(stderr,
-            "requested entropy mode(%d) was not used, using (%d) instead.\n",
-            cfg->header_mode, ext_ctrl[3].value);
-
-  return ret;
+    encoder_ctrl++;
+  };
 }
 
-int configure_common(int v4lfd, struct encoder_cfg* cfg) {
-  int ret = 0;
-  const int kCommonCtrlCnt = 5;
+int enabled_control_count(const struct encoder_control* encoder_ctrl) {
+  int cnt = 0;
 
-  struct v4l2_ext_control ext_ctrl[kCommonCtrlCnt];
+  for (; encoder_ctrl && encoder_ctrl->id != 0; ++encoder_ctrl)
+    cnt += encoder_ctrl->enabled;
+
+  return cnt;
+}
+
+void set_control_value(struct encoder_control* encoder_ctrl,
+                       uint32_t id,
+                       uint32_t value) {
+  for (; encoder_ctrl && encoder_ctrl->id != 0; ++encoder_ctrl) {
+    if (encoder_ctrl->id == id){
+      encoder_ctrl->value = value;
+      break;
+    }
+  }
+}
+
+int get_control_value(const struct encoder_control* encoder_ctrl, uint32_t id) {
+  for (; encoder_ctrl && encoder_ctrl->id != 0; ++encoder_ctrl) {
+    if (encoder_ctrl->id == id)
+      return encoder_ctrl->value;
+  };
+
+  return -1;
+}
+
+const char *get_control_name(const struct encoder_control* encoder_ctrl,
+                             uint32_t id) {
+  for (; encoder_ctrl && encoder_ctrl->id != 0; ++encoder_ctrl) {
+    if (encoder_ctrl->id == id)
+      return encoder_ctrl->name;
+  };
+
+  return "unknown";
+}
+
+void fill_ext_controls(const struct encoder_control* encoder_ctrl,
+                       struct v4l2_ext_control *ext_ctrl) {
+  int enabled_i = 0;
+  for (; encoder_ctrl && encoder_ctrl->id != 0; ++encoder_ctrl) {
+    if (encoder_ctrl->enabled) {
+      ext_ctrl[enabled_i].id = encoder_ctrl->id;
+      ext_ctrl[enabled_i].value = encoder_ctrl->value;
+      enabled_i++;
+    }
+  }
+}
+
+int set_ext_controls(int v4lfd, const struct encoder_control* encoder_ctrl) {
+  const int ctrl_cnt = enabled_control_count(encoder_ctrl);
+
+  struct v4l2_ext_control ext_ctrl[ctrl_cnt];
   memset(&ext_ctrl, 0, sizeof(ext_ctrl));
 
-  ext_ctrl[0].id = V4L2_CID_MPEG_VIDEO_BITRATE;
-  ext_ctrl[0].value = cfg->bitrate;
-
-  ext_ctrl[1].id = V4L2_CID_MPEG_VIDEO_BITRATE_PEAK;
-  ext_ctrl[1].value = cfg->bitrate * 2;
-
-  ext_ctrl[2].id = V4L2_CID_MPEG_VIDEO_GOP_SIZE;
-  ext_ctrl[2].value = cfg->gop_size;
-
-  ext_ctrl[3].id = V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE;
-  ext_ctrl[3].value = 1;
-
-  ext_ctrl[4].id = V4L2_CID_MPEG_VIDEO_BITRATE_MODE;
-  ext_ctrl[4].value = cfg->bitrate_mode;
+  fill_ext_controls(encoder_ctrl, ext_ctrl);
 
   struct v4l2_ext_controls ext_ctrls;
   memset(&ext_ctrls, 0, sizeof(ext_ctrls));
 
   ext_ctrls.ctrl_class = V4L2_CTRL_CLASS_MPEG;
-  ext_ctrls.count = kCommonCtrlCnt;
+  ext_ctrls.count = ctrl_cnt;
   ext_ctrls.controls = ext_ctrl;
 
-  ret = ioctl(v4lfd, VIDIOC_S_EXT_CTRLS, &ext_ctrls);
-
-  if (ret != 0)
+  const int set_ret = ioctl(v4lfd, VIDIOC_S_EXT_CTRLS, &ext_ctrls);
+  if (set_ret != 0)
     perror("VIDIOC_S_EXT_CTRLS failed");
 
-  for (uint32_t i = 0; i < kCommonCtrlCnt; ++i)
+  for (uint32_t i = 0; i < ctrl_cnt; ++i)
     ext_ctrl[i].value = 0;
 
-  ret = ioctl(v4lfd, VIDIOC_G_EXT_CTRLS, &ext_ctrls);
-  if (ret != 0)
+  const int get_ret = ioctl(v4lfd, VIDIOC_G_EXT_CTRLS, &ext_ctrls);
+  if (get_ret != 0)
     perror("VIDIOC_G_EXT_CTRLS failed");
 
-  if (ext_ctrl[0].value != cfg->bitrate)
-    fprintf(
-        stderr,
-        "requested bitrate(%d) was outside of the limit, using (%d) instead.\n",
-        cfg->bitrate, ext_ctrl[0].value);
 
-  if (ext_ctrl[1].value != cfg->bitrate * 2)
-    fprintf(stderr,
-            "requested bitrate peak(%d) was outside of the limit, using (%d) "
-            "instead.\n",
-            cfg->bitrate * 2, ext_ctrl[1].value);
+  for (int i = 0; i < ctrl_cnt; ++i) {
+    int ctrl_value = get_control_value(encoder_ctrl, ext_ctrl[i].id);
+    if (ext_ctrl[i].value != ctrl_value){
+      fprintf(stderr,
+        "control (%s) used a value of (%d) instead of the requested (%d)\n",
+        get_control_name(encoder_ctrl, ext_ctrl[i].id),
+        ext_ctrl[i].value,
+        ctrl_value);
+    }
+  }
 
-  if (ext_ctrl[2].value != cfg->gop_size)
-    fprintf(stderr,
-            "requested gop size(%d) was not used, using (%d) instead.\n",
-            cfg->gop_size, ext_ctrl[2].value);
-
-  if (ext_ctrl[3].value != 1)
-    fprintf(
-        stderr,
-        "requested frame rate control (%d) was not used, using (%d) instead.\n",
-        1, ext_ctrl[3].value);
-
-  if (ext_ctrl[4].value != cfg->bitrate_mode)
-    fprintf(stderr,
-            "requested bitrate mode(%d) was not used, using (%d) instead.\n",
-            cfg->bitrate_mode, ext_ctrl[4].value);
-
-  return ret;
+  return set_ret | get_ret;
 }
 
 int dequeue_buffer(struct queue* queue,
@@ -922,14 +904,27 @@ int main(int argc, char* argv[]) {
   int verbose_capabilities = 0;
   int c;
 
-  struct encoder_cfg cfg = {
-      .gop_size = 20,
-      .bitrate = 1000,
-      .h264_entropy_mode = V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC,
-      .h264_level = V4L2_MPEG_VIDEO_H264_LEVEL_4_0,
-      .h264_profile = V4L2_MPEG_VIDEO_H264_PROFILE_MAIN,
-      .header_mode = V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE,
-      .bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_VBR};
+  struct encoder_control common_control_list[] = {
+    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_BITRATE, 1000),
+    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_GOP_SIZE, 20),
+    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE, 1),
+    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
+      V4L2_MPEG_VIDEO_BITRATE_MODE_VBR),
+    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, 1500),
+    ENCODER_CTL(0, 0)
+  };
+
+  struct encoder_control h264_control_list[] = {
+    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_PROFILE,
+      V4L2_MPEG_VIDEO_H264_PROFILE_MAIN),
+    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_LEVEL,
+      V4L2_MPEG_VIDEO_H264_LEVEL_4_0),
+    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE,
+      V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC),
+    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_HEADER_MODE,
+      V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE),
+    ENCODER_CTL(0, 0)
+  };
 
   while ((c = getopt_long(argc, argv, "f:i:o:w:h:m:r:b:g:c:e:vq:", longopts,
                           NULL)) != -1) {
@@ -960,10 +955,17 @@ int main(int argc, char* argv[]) {
         framerate = atoi(optarg);
         break;
       case 'b':
-        cfg.bitrate = atoi(optarg);
+        set_control_value(common_control_list,
+                          V4L2_CID_MPEG_VIDEO_BITRATE,
+                          atoi(optarg));
+        set_control_value(common_control_list,
+                          V4L2_CID_MPEG_VIDEO_BITRATE_PEAK,
+                          atoi(optarg) * 2);
         break;
       case 'g':
-        cfg.gop_size = atoi(optarg);
+        set_control_value(common_control_list,
+                          V4L2_CID_MPEG_VIDEO_GOP_SIZE,
+                          atoi(optarg));
         break;
       case 'c':
         if (strlen(optarg) == 4) {
@@ -975,7 +977,9 @@ int main(int argc, char* argv[]) {
       case 'e':
         if (strlen(optarg) == 3 && toupper(optarg[0]) == 'C' &&
             toupper(optarg[1]) == 'B' && toupper(optarg[2]) == 'R') {
-          cfg.bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR;
+          set_control_value(common_control_list,
+                            V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
+                            V4L2_MPEG_VIDEO_BITRATE_MODE_CBR);
         }
         break;
       case 'v':
@@ -1013,9 +1017,11 @@ int main(int argc, char* argv[]) {
     fseek(fp, 0, SEEK_SET);
   }
 
+  const int bitrate_mode = get_control_value(common_control_list,
+                                             V4L2_CID_MPEG_VIDEO_BITRATE_MODE);
   fprintf(
       stderr, "encoding %d frames using %s bitrate control\n", frames_to_decode,
-      (cfg.bitrate_mode = V4L2_MPEG_VIDEO_BITRATE_MODE_CBR) ? "CBR" : "VBR");
+      (bitrate_mode == V4L2_MPEG_VIDEO_BITRATE_MODE_CBR) ? "CBR" : "VBR");
 
   int v4lfd = open(kEncodeDevice, O_RDWR | O_NONBLOCK | O_CLOEXEC);
   if (v4lfd < 0) {
@@ -1048,13 +1054,14 @@ int main(int argc, char* argv[]) {
 
   int ret = Initialization(&OUTPUT_queue, &CAPTURE_queue);
 
-  // not all configurations are supported, so we don't need to track
-  // the return value
   if (!ret) {
-    configure_common(v4lfd, &cfg);
+    // not all configurations are supported on all platforms
+    disable_unsupported_controls(v4lfd, common_control_list);
+    disable_unsupported_controls(v4lfd, h264_control_list);
+    ret = set_ext_controls(v4lfd, common_control_list);
 
-    if (v4l2_fourcc('H', '2', '6', '4') == CAPTURE_format)
-      configure_h264(v4lfd, &cfg);
+    if (!ret && v4l2_fourcc('H', '2', '6', '4') == CAPTURE_format)
+      ret = set_ext_controls(v4lfd, h264_control_list);
   }
 
   if (!ret) {
