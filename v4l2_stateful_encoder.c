@@ -110,8 +110,7 @@ void enumerate_menu(int v4lfd, uint32_t id, uint32_t min, uint32_t max) {
 
 int capabilities(int v4lfd,
                  uint32_t OUTPUT_format,
-                 uint32_t CAPTURE_format,
-                 int verbose_capabilities) {
+                 uint32_t CAPTURE_format) {
   struct v4l2_capability cap;
   memset(&cap, 0, sizeof(cap));
   int ret = ioctl(v4lfd, VIDIOC_QUERYCAP, &cap);
@@ -134,54 +133,6 @@ int capabilities(int v4lfd,
     ret = 1;
   }
 
-  if (verbose_capabilities) {
-    struct v4l2_query_ext_ctrl queryctrl;
-    memset(&queryctrl, 0, sizeof(queryctrl));
-
-    for (queryctrl.id = V4L2_CID_BASE; queryctrl.id < V4L2_CID_LASTP1;
-         queryctrl.id++) {
-      if (0 == ioctl(v4lfd, VIDIOC_QUERY_EXT_CTRL, &queryctrl)) {
-        fprintf(
-            stderr, "control %s : %s\n", queryctrl.name,
-            queryctrl.flags & V4L2_CTRL_FLAG_DISABLED ? "disabled" : "enabled");
-        if (queryctrl.type == V4L2_CTRL_TYPE_MENU)
-          enumerate_menu(v4lfd, queryctrl.id, queryctrl.minimum,
-                         queryctrl.maximum);
-      } else if (errno == EINVAL) {
-        continue;
-      }
-    }
-
-    for (queryctrl.id = V4L2_CID_PRIVATE_BASE;; queryctrl.id++) {
-      if (0 == ioctl(v4lfd, VIDIOC_QUERY_EXT_CTRL, &queryctrl)) {
-        if (queryctrl.flags & V4L2_CTRL_FLAG_DISABLED)
-          continue;
-
-        fprintf(stderr, "control %s\n", queryctrl.name);
-
-        if (queryctrl.type == V4L2_CTRL_TYPE_MENU)
-          enumerate_menu(v4lfd, queryctrl.id, queryctrl.minimum,
-                         queryctrl.maximum);
-      } else if (errno == EINVAL) {
-        break;
-      }
-    }
-
-    memset(&queryctrl, 0, sizeof(queryctrl));
-    queryctrl.id = V4L2_CTRL_CLASS_MPEG | V4L2_CTRL_FLAG_NEXT_CTRL;
-    while (0 == ioctl(v4lfd, VIDIOC_QUERY_EXT_CTRL, &queryctrl)) {
-      fprintf(stderr, "control %s\n", queryctrl.name);
-
-      if (queryctrl.type == V4L2_CTRL_TYPE_MENU)
-        enumerate_menu(v4lfd, queryctrl.id, queryctrl.minimum,
-                       queryctrl.maximum);
-
-      if (V4L2_CTRL_ID2CLASS(queryctrl.id) != V4L2_CTRL_CLASS_MPEG)
-        break;
-      /* ... */
-      queryctrl.id |= V4L2_CTRL_FLAG_NEXT_CTRL;
-    }
-  }
   return ret;
 }
 
@@ -870,7 +821,6 @@ static void print_help(const char* argv0) {
   printf("  -g, --gop         gop length\n");
   printf("  -c, --codec       codec\n");
   printf("  -e, --end_usage   rate control mode: VBR (default), CBR\n");
-  printf("  -v, --verbose     verbose capabilities\n");
   printf("  -q, --buffer_fmt  OUTPUT queue format\n");
 }
 
@@ -886,7 +836,6 @@ static const struct option longopts[] = {
     {"gop", required_argument, NULL, 'g'},
     {"codec", required_argument, NULL, 'c'},
     {"end_usage", required_argument, NULL, 'e'},
-    {"verbose", no_argument, NULL, 'v'},
     {"buffer_fmt", required_argument, NULL, 'q'},
     {0, 0, 0, 0},
 };
@@ -901,7 +850,6 @@ int main(int argc, char* argv[]) {
   uint32_t height = 0;
   uint32_t frames_to_decode = 0;
   uint32_t framerate = 30;
-  int verbose_capabilities = 0;
   int c;
 
   struct encoder_control common_control_list[] = {
@@ -926,7 +874,7 @@ int main(int argc, char* argv[]) {
     ENCODER_CTL(0, 0)
   };
 
-  while ((c = getopt_long(argc, argv, "f:i:o:w:h:m:r:b:g:c:e:vq:", longopts,
+  while ((c = getopt_long(argc, argv, "f:i:o:w:h:m:r:b:g:c:e:q:", longopts,
                           NULL)) != -1) {
     switch (c) {
       case 'f':
@@ -982,9 +930,6 @@ int main(int argc, char* argv[]) {
                             V4L2_MPEG_VIDEO_BITRATE_MODE_CBR);
         }
         break;
-      case 'v':
-        verbose_capabilities = 1;
-        break;
       case 'q':
         if (strlen(optarg) == 4) {
           OUTPUT_format = v4l2_fourcc(toupper(optarg[0]), toupper(optarg[1]),
@@ -1029,8 +974,7 @@ int main(int argc, char* argv[]) {
     exit(EXIT_FAILURE);
   }
 
-  if (capabilities(v4lfd, OUTPUT_format, CAPTURE_format,
-                   verbose_capabilities) != 0) {
+  if (capabilities(v4lfd, OUTPUT_format, CAPTURE_format) != 0) {
     fprintf(stderr, "Capabilities not present for encode.\n");
     exit(EXIT_FAILURE);
   }
