@@ -657,7 +657,8 @@ int dequeue_buffer(struct queue* queue,
                    uint32_t* index,
                    uint32_t* bytesused,
                    uint32_t* data_offset,
-                   uint64_t* timestamp) {
+                   uint64_t* timestamp,
+                   uint32_t* flags) {
   struct v4l2_buffer v4l2_buffer;
   struct v4l2_plane planes[VIDEO_MAX_PLANES] = {0};
   memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
@@ -677,7 +678,47 @@ int dequeue_buffer(struct queue* queue,
     *data_offset = v4l2_buffer.m.planes[0].data_offset;
   if (timestamp)
     *timestamp = v4l2_buffer.timestamp.tv_usec;
+  if (flags)
+    *flags = v4l2_buffer.flags;
+
   return ret;
+}
+
+// 4.5.2.8. Drain
+void drain(struct queue* OUTPUT_queue,
+           struct queue* CAPTURE_queue) {
+
+  // 1. Begin the drain sequence by issuing VIDIOC_ENCODER_CMD().
+  struct v4l2_encoder_cmd cmd;
+  memset(&cmd, 0, sizeof(cmd));
+  cmd.cmd = V4L2_ENC_CMD_STOP;
+
+  // V4L2_ENC_CMD_STOP may not be supported, don't worry about result
+  ioctl(CAPTURE_queue->v4lfd, VIDIOC_ENCODER_CMD, &cmd);
+
+  // 2. Dequeue buffers
+  // The way the encode loop is set up, there shouldn't be any buffers
+  // left to dequeue.
+  {
+    uint32_t index = 0;
+    uint32_t bytesused = 0;
+    uint32_t flags = 0;
+
+    // check to make sure the queue is empty
+    dequeue_buffer(CAPTURE_queue, &index, &bytesused, 0, 0, &flags);
+
+    if (!(flags & V4L2_BUF_FLAG_LAST) && (bytesused != 0))
+      fprintf(stderr, "WARNING: CAPTURE queue did not clean up.\n");
+  }
+
+  // 3. Reset by issuing VIDIOC_STREAMOFF
+  int ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_STREAMOFF, &OUTPUT_queue->type);
+  if (ret != 0)
+    perror("VIDIOC_STREAMOFF failed on OUTPUT");
+
+  ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_STREAMOFF, &CAPTURE_queue->type);
+  if (ret != 0)
+    perror("VIDIOC_STREAMOFF failed on CAPTURE");
 }
 
 int encode(FILE* fp_input,
@@ -685,7 +726,7 @@ int encode(FILE* fp_input,
            char* output_file_name,
            struct queue* OUTPUT_queue,
            struct queue* CAPTURE_queue,
-           uint32_t frames_to_decode) {
+           uint32_t frames_to_encode) {
   if (OUTPUT_queue->num_planes == 0 || OUTPUT_queue->num_planes > 3) {
     fprintf(stderr, " unsupported number of planes: %d\n",
             OUTPUT_queue->num_planes);
@@ -715,7 +756,7 @@ int encode(FILE* fp_input,
     // hard coded 30fps
     header.denominator = 30;
     header.numerator = 1;
-    header.frame_cnt = frames_to_decode;
+    header.frame_cnt = frames_to_encode;
     header.unused = 0;
 
     if (fwrite(&header, sizeof(struct ivf_file_header), 1, fp_output) != 1) {
@@ -749,7 +790,7 @@ int encode(FILE* fp_input,
 
   uint32_t cnt = OUTPUT_queue->cnt;  // We pre-uploaded a few before.
   if (!ret) {
-    while (cnt < frames_to_decode) {
+    while (cnt < frames_to_encode) {
       // handle CAPTURE queue first
       {
         uint32_t index = 0;
@@ -759,7 +800,7 @@ int encode(FILE* fp_input,
 
         // first get the newly encoded frame
         ret = dequeue_buffer(CAPTURE_queue, &index, &bytesused, &data_offset,
-                             &timestamp);
+                             &timestamp, 0);
         if (ret != 0)
           continue;
 
@@ -784,7 +825,7 @@ int encode(FILE* fp_input,
       {
         uint32_t index = 0;
 
-        ret = dequeue_buffer(OUTPUT_queue, &index, 0, 0, 0);
+        ret = dequeue_buffer(OUTPUT_queue, &index, 0, 0, 0, 0);
         if (ret != 0)
           continue;
 
@@ -794,6 +835,9 @@ int encode(FILE* fp_input,
       cnt++;
     }
   }
+
+  drain(OUTPUT_queue, CAPTURE_queue);
+
   clock_gettime(CLOCK_REALTIME, &stop);
   const double elapsed_ns =
       (stop.tv_sec - start.tv_sec) * 1e9 + (stop.tv_nsec - start.tv_nsec);
@@ -848,7 +892,7 @@ int main(int argc, char* argv[]) {
   char* output_file_name = NULL;
   uint32_t width = 0;
   uint32_t height = 0;
-  uint32_t frames_to_decode = 0;
+  uint32_t frames_to_encode = 0;
   uint32_t framerate = 30;
   int c;
 
@@ -897,7 +941,7 @@ int main(int argc, char* argv[]) {
         height = atoi(optarg);
         break;
       case 'm':
-        frames_to_decode = atoi(optarg);
+        frames_to_encode = atoi(optarg);
         break;
       case 'r':
         framerate = atoi(optarg);
@@ -954,18 +998,18 @@ int main(int argc, char* argv[]) {
     exit(1);
   }
 
-  if (!frames_to_decode) {
+  if (!frames_to_encode) {
     fseek(fp, 0, SEEK_END);
     uint64_t length = ftell(fp);
     uint32_t frame_size = (3 * width * height) >> 1;
-    frames_to_decode = length / frame_size;
+    frames_to_encode = length / frame_size;
     fseek(fp, 0, SEEK_SET);
   }
 
   const int bitrate_mode = get_control_value(common_control_list,
                                              V4L2_CID_MPEG_VIDEO_BITRATE_MODE);
   fprintf(
-      stderr, "encoding %d frames using %s bitrate control\n", frames_to_decode,
+      stderr, "encoding %d frames using %s bitrate control\n", frames_to_encode,
       (bitrate_mode == V4L2_MPEG_VIDEO_BITRATE_MODE_CBR) ? "CBR" : "VBR");
 
   int v4lfd = open(kEncodeDevice, O_RDWR | O_NONBLOCK | O_CLOEXEC);
@@ -1010,12 +1054,8 @@ int main(int argc, char* argv[]) {
 
   if (!ret) {
     ret = encode(fp, file_format, output_file_name, &OUTPUT_queue,
-                 &CAPTURE_queue, frames_to_decode);
+                 &CAPTURE_queue, frames_to_encode);
   }
-
-  // On kukui (MTK8183), removing this sleep() causes a hard crash.
-  // TODO(b/182200028): Investigate why and remove it.
-  sleep(1);
 
   cleanup_queue(&OUTPUT_queue);
   cleanup_queue(&CAPTURE_queue);
