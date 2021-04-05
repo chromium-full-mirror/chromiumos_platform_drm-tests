@@ -78,7 +78,7 @@ static const struct bs_draw_format bs_draw_formats[] = {
 	    PIXEL_FORMAT_AND_NAME(NV12),
 	    3,
 	    {
-		{ { 0.2567890625f, 0.50412890625f, 0.09790625f }, 16.0f, 1, 1, 1, 0, 0 },
+		{ { 0.2567890625f, 0.50412890625f, 0.09790625f },       16.0f, 1, 1, 1, 0, 0 },
 		{ { -0.14822265625f, -0.2909921875f, 0.43921484375f }, 128.0f, 2, 2, 2, 1, 0 },
 		{ { 0.43921484375f, -0.3677890625f, -0.07142578125f }, 128.0f, 2, 2, 2, 1, 1 },
 	    },
@@ -146,6 +146,15 @@ static const struct bs_draw_format bs_draw_formats[] = {
 		{ { -0.14822265625f, -0.2909921875f, 0.43921484375f }, 128.0f, 2, 2, 1, 2, 0 },
 	    },
 	},
+	{
+	    PIXEL_FORMAT_AND_NAME(P010),
+	    3,
+	    {
+		{ { 0.2567890625f, 0.50412890625f, 0.09790625f },       16.0f, 1, 1, 2, 0, 0 },
+		{ { -0.14822265625f, -0.2909921875f, 0.43921484375f }, 128.0f, 2, 2, 4, 1, 0 },
+		{ { 0.43921484375f, -0.3677890625f, -0.07142578125f }, 128.0f, 2, 2, 4, 1, 2 },
+	    },
+	},
 };
 
 struct draw_plane {
@@ -201,8 +210,9 @@ static bool draw_color(struct bs_mapper *mapper, struct gbm_bo *bo,
 {
 	uint8_t *ptr, *converted_colors[MAX_COMPONENTS];
 	struct draw_plane planes[GBM_MAX_PLANES];
-	uint32_t height = data->h = gbm_bo_get_height(bo);
-	uint32_t width = data->w = gbm_bo_get_width(bo);
+	const uint32_t height = data->h = gbm_bo_get_height(bo);
+	const uint32_t width = data->w = gbm_bo_get_width(bo);
+	const uint32_t bytes_per_pixel = gbm_bo_get_bpp(bo);
 
 	size_t num_planes = mmap_planes(mapper, bo, planes);
 	if (num_planes == 0) {
@@ -236,22 +246,27 @@ static bool draw_color(struct bs_mapper *mapper, struct gbm_bo *bo,
 	for (size_t comp_index = 0; comp_index < format->component_count; comp_index++) {
 		const struct draw_format_component *comp = &format->components[comp_index];
 		struct draw_plane *plane = &planes[comp->plane_index];
+
 		for (uint32_t y = 0; y < height / comp->vertical_subsample_rate; y++) {
 			rows[comp_index] = plane->ptr + comp->plane_offset + plane->row_stride * y;
+
 			for (uint32_t x = 0; x < width / comp->horizontal_subsample_rate; x++) {
 				offset = color = samples = 0;
+
 				for (uint32_t j = 0; j < comp->vertical_subsample_rate; j++) {
 					offset = (y * comp->vertical_subsample_rate + j) * width +
 						 x * comp->horizontal_subsample_rate;
-					for (uint32_t i = 0; i < comp->horizontal_subsample_rate;
-					     i++) {
+					for (uint32_t i = 0; i < comp->horizontal_subsample_rate; i++) {
 						color += converted_colors[comp_index][offset];
 						samples++;
 						offset++;
 					}
 				}
-
-				*(rows[comp_index] + x * comp->byte_skip) = color / samples;
+				uint8_t* const byte_address = rows[comp_index] + x * comp->byte_skip;
+				if (bytes_per_pixel != 2u)
+					*byte_address = color / samples;
+				else // This is for P010 and similar high-bit depth YUV formats.
+					*(uint16_t *)byte_address = (color / samples) << 8;
 			}
 		}
 	}

@@ -483,11 +483,12 @@ int main(int argc, char **argv)
 		printf("Creating buffer %ux%u %s\n", tp->bo_w, tp->bo_h,
 		       bs_get_format_name(tp->format));
 		tp->bo = gbm_bo_create(gbm, tp->bo_w, tp->bo_h, bs_get_pixel_format(tp->format),
-				       GBM_BO_USE_SCANOUT | GBM_BO_USE_SW_WRITE_RARELY);
+				       GBM_BO_USE_SCANOUT);
 		if (!tp->bo) {
 			bs_debug_error("failed to create buffer object");
 			return 1;
 		}
+		printf("Bytes per pixel: %d\n", gbm_bo_get_bpp(tp->bo));
 
 		tp->fb_id = bs_drm_fb_create_gbm(tp->bo);
 		if (!tp->fb_id) {
