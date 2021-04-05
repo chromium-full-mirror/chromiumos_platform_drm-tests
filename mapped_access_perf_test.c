@@ -17,7 +17,6 @@
 
 #include <assert.h>
 #include <getopt.h>
-#include <libyuv.h>
 #include <linux/dma-buf.h>
 #include <sys/ioctl.h>
 #include <time.h>
