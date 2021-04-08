@@ -283,7 +283,7 @@ int main(int argc, char** argv) {
       }
 
       for (size_t plane = 0; plane < NUM_PLANES; plane++) {
-        gbm_bo_fds[plane][j] = gbm_bo_get_plane_fd(bos[j], plane);
+        gbm_bo_fds[plane][j] = gbm_bo_get_fd_for_plane(bos[j], plane);
         if (gbm_bo_fds[plane][j] < 0) {
           bs_debug_error("failed to get BO fd");
           return EXIT_FAILURE;

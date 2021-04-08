@@ -320,7 +320,7 @@ int queue_buffer_CAPTURE(struct queue* queue, uint32_t index) {
   struct gbm_bo* bo = queue->buffers[index].bo;
   for (uint32_t i = 0; i < queue->num_planes; ++i) {
     if (queue->memory == V4L2_MEMORY_DMABUF) {
-      v4l2_buffer.m.planes[i].m.fd = gbm_bo_get_plane_fd(bo, i);
+      v4l2_buffer.m.planes[i].m.fd = gbm_bo_get_fd_for_plane(bo, i);
     } else if (queue->memory == V4L2_MEMORY_MMAP) {
       struct mmap_buffers* buffers = queue->buffers;
 

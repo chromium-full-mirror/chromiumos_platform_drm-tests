@@ -39,7 +39,7 @@ struct bs_mapper {
 static void *dma_buf_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 			 struct bs_map_info *info, uint32_t *stride)
 {
-	int drm_prime_fd = gbm_bo_get_plane_fd(bo, plane);
+	int drm_prime_fd = gbm_bo_get_fd_for_plane(bo, plane);
 	uint32_t handle = gbm_bo_get_handle_for_plane(bo, plane).u32;
 	size_t length = 0;
 
@@ -71,7 +71,7 @@ static void dma_buf_unmap(struct gbm_bo *bo, struct bs_map_info *info)
 {
 	struct dma_buf_sync sync_end = { 0 };
 	sync_end.flags = DMA_BUF_SYNC_END | DMA_BUF_SYNC_RW;
-	int drm_prime_fd = gbm_bo_get_plane_fd(bo, info->plane_index);
+	int drm_prime_fd = gbm_bo_get_fd_for_plane(bo, info->plane_index);
 	int ret = HANDLE_EINTR(ioctl(drm_prime_fd, DMA_BUF_IOCTL_SYNC, &sync_end));
 	close(drm_prime_fd);
 	if (ret)

@@ -255,7 +255,7 @@ EGLImageKHR bs_egl_image_create_gbm(struct bs_egl *self, struct gbm_bo *bo)
 
 	int fds[GBM_MAX_PLANES];
 	for (size_t plane = 0; plane < gbm_bo_get_plane_count(bo); plane++) {
-		fds[plane] = gbm_bo_get_plane_fd(bo, plane);
+		fds[plane] = gbm_bo_get_fd_for_plane(bo, plane);
 		if (fds[plane] < 0) {
 			bs_debug_error("failed to get fb for bo: %d", fds[plane]);
 			return EGL_NO_IMAGE_KHR;
