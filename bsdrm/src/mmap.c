@@ -119,16 +119,15 @@ static void *gem_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 	void *ptr = NULL;
 	// Use mmap() for planar formats and gbm_bo_map() for others.
 	if (gbm_bo_get_plane_count(bo) > 1) {
-		const int drm_prime_fd = gbm_bo_get_fd_for_plane(bo, plane);
-		const size_t plane_length = bs_calculate_plane_size(bo, plane);
-		assert(plane_length);
-		ptr =
-		    mmap(NULL, plane_length, (PROT_READ | PROT_WRITE), MAP_SHARED, drm_prime_fd, 0);
+		// TODO(mcasas, b/185492766): Use mmap() here.
+		ptr = gbm_bo_map2(bo, /*x=*/0, /*y=*/0, w, h, GBM_BO_TRANSFER_READ_WRITE, stride,
+				 &info->map_data, plane);
 	} else {
 		assert(plane == 0);
 		ptr = gbm_bo_map(bo, /*x=*/0, /*y=*/0, w, h, GBM_BO_TRANSFER_READ_WRITE, stride,
 				 &info->map_data);
 	}
+	assert(ptr);
 	return ptr;
 }
 
