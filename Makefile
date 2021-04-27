@@ -81,6 +81,7 @@ endif
 
 CC_BINARY(v4l2_stateful_decoder): v4l2_stateful_decoder.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
 CC_BINARY(v4l2_stateful_decoder): LDLIBS += $(DRM_LIBS)
+CC_BINARY(v4l2_stateful_decoder): LDLIBS += -lssl -lcrypto
 
 CC_BINARY(v4l2_stateful_encoder): v4l2_stateful_encoder.o
 

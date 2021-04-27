@@ -11,6 +11,7 @@
 #include <getopt.h>
 #include <limits.h>
 #include <linux/videodev2.h>
+#include <openssl/md5.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +26,8 @@ static const char* kDecodeDevice = "/dev/video-dec0";
 static const int kInputbufferMaxSize = 4 * 1024 * 1024;
 static const int kRequestBufferCount = 8;
 static const uint32_t kIVFHeaderSignature = v4l2_fourcc('D', 'K', 'I', 'F');
+
+static bool verbose_enabled = false;
 
 struct mmap_buffers {
   void* start[VIDEO_MAX_PLANES];
@@ -42,6 +45,7 @@ struct queue {
   uint32_t cnt;
   uint32_t num_planes;
   uint32_t memory;
+  uint32_t stride;
 };
 
 struct ivf_file_header {
@@ -92,6 +96,7 @@ struct compressed_file open_file(const char* file_name) {
     file.fp = fp;
     print_fourcc(file.header.fourcc);
     printf("ivf file header: %d x %d\n", file.header.width, file.header.height);
+    printf("ivf file header: frame_cnt = %d\n", file.header.frame_cnt);
   } else {
     fprintf(stderr, "unable to open file: %s\n", file_name);
   }
@@ -149,12 +154,13 @@ int request_mmap_buffers(struct queue* queue,
   const int v4lfd = queue->v4lfd;
   const uint32_t buffer_alloc = reqbuf->count * sizeof(struct mmap_buffers);
   struct mmap_buffers* buffers = (struct mmap_buffers*)malloc(buffer_alloc);
+  assert(buffers);
   memset(buffers, 0, buffer_alloc);
   queue->buffers = buffers;
   queue->cnt = reqbuf->count;
 
   int ret;
-  for (uint32_t i = 0; i < reqbuf->count; i++) {
+  for (uint32_t i = 0; i < reqbuf->count; ++i) {
     struct v4l2_buffer buffer;
     struct v4l2_plane planes[VIDEO_MAX_PLANES];
     memset(&buffer, 0, sizeof(buffer));
@@ -169,7 +175,7 @@ int request_mmap_buffers(struct queue* queue,
       break;
     }
 
-    for (uint32_t j = 0; j < queue->num_planes; j++) {
+    for (uint32_t j = 0; j < queue->num_planes; ++j) {
       buffers[i].length[j] = buffer.m.planes[j].length;
       buffers[i].start[j] =
           mmap(NULL, buffer.m.planes[j].length, PROT_READ | PROT_WRITE,
@@ -183,6 +189,62 @@ int request_mmap_buffers(struct queue* queue,
   }
 
   return ret;
+}
+
+// NV12 to I420 conversion.
+// This function converts the NV12 |buffer_in| into an I420 |buffer_out|.
+// |buffer_in| is padded, whereas |buffer_out| is tightly packed.
+// Example with width = 8, height = 2, stride = 10.
+//
+// NV12           I420
+// YYYYYYYY00     YYYYYYYY
+// YYYYYYYY00     YYYYYYYY
+// UVUVUVUV00     UUUUVVVV
+//
+// HW pads 0s for |stride - width| bytes after each row on Trogdor.
+// But other platforms might leave the padding uninitialized,
+// and in yet others accessing it might causes a crash of some sort (access
+// violation).
+void nv12_to_i420(uint32_t width,
+                  uint32_t height,
+                  uint32_t stride,
+                  uint8_t* buffer_in,
+                  uint8_t* buffer_out) {
+  // Copy luma data from |buffer_in| one row at a time
+  // to avoid touching the padding.
+  for (int row = 0; row < height; ++row)
+    memcpy(buffer_out + row * width, buffer_in + row * stride, width);
+
+  const size_t y_plane_size = width * height;
+  const size_t u_plane_size = y_plane_size / 4;
+  uint8_t* u_plane_out = &buffer_out[y_plane_size];
+  uint8_t* v_plane_out = u_plane_out + u_plane_size;
+  const size_t uv_plane_offset = stride * height;
+
+  for (int row = 0; row < height / 2; ++row) {
+    for (int column = 0; column < width / 2; ++column) {
+      *(u_plane_out + row * width / 2 + column) =
+          buffer_in[uv_plane_offset + row * stride + 2 * column];
+
+      *(v_plane_out + row * width / 2 + column) =
+          buffer_in[uv_plane_offset + row * stride + 2 * column + 1];
+    }
+  }
+}
+
+// Compute md5sum for each frame.
+void compute_md5sum(uint8_t* buffer_i420, uint32_t output_size) {
+  int n;
+  uint8_t out[16];
+
+  MD5_CTX ctx;
+  MD5_Init(&ctx);
+  MD5_Update(&ctx, buffer_i420, output_size);
+  MD5_Final(out, &ctx);
+
+  for (n = 0; n < 16; ++n)
+    printf("%02x", out[n]);  // md5sum value for each frame
+  printf("\n");
 }
 
 // this is the input queue that will take compressed data
@@ -240,9 +302,13 @@ int submit_compressed_frame(struct compressed_file* file,
   const uint32_t den = file->header.denominator;
 
   struct ivf_frame_header frame_header = {0};
+
   if (fread(&frame_header, sizeof(struct ivf_frame_header), 1, file->fp) != 1) {
     if (!feof(file->fp))
       fprintf(stderr, "unable to read ivf frame header\n");
+    else
+      printf("unable to read ivf frame header, reached the end of ivf file\n");
+
     return -1;
   }
 
@@ -292,8 +358,8 @@ void cleanup_queue(struct queue* queue) {
   if (queue->cnt) {
     struct mmap_buffers* buffers = queue->buffers;
 
-    for (uint32_t i = 0; i < queue->cnt; i++)
-      for (uint32_t j = 0; j < queue->num_planes; j++) {
+    for (uint32_t i = 0; i < queue->cnt; ++i)
+      for (uint32_t j = 0; j < queue->num_planes; ++j) {
         if (buffers[i].length[j])
           munmap(buffers[i].start[j], buffers[i].length[j]);
         if (buffers[i].bo)
@@ -361,6 +427,12 @@ int setup_CAPTURE(struct gbm_device* gbm,
     CAPTURE_queue->num_planes = fmt.fmt.pix_mp.num_planes;
 
     printf("CAPTURE: %d x %d\n", fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height);
+    printf("num_planes = %d\n", fmt.fmt.pix_mp.num_planes);
+
+    // Only Y stride is needed on Trogdor.
+    CAPTURE_queue->stride = fmt.fmt.pix_mp.plane_fmt[0].bytesperline;
+    if (verbose_enabled)
+      printf("plane 0, stride = %d\n", CAPTURE_queue->stride);
   }
 
   // 4. Optional. Set the CAPTURE format via VIDIOC_S_FMT() on the CAPTURE
@@ -399,6 +471,7 @@ int setup_CAPTURE(struct gbm_device* gbm,
     if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
       const uint32_t buffer_alloc = reqbuf.count * sizeof(struct mmap_buffers);
       struct mmap_buffers* buffers = (struct mmap_buffers*)malloc(buffer_alloc);
+      assert(buffers);
       memset(buffers, 0, buffer_alloc);
       CAPTURE_queue->buffers = buffers;
       CAPTURE_queue->cnt = reqbuf.count;
@@ -423,7 +496,7 @@ int setup_CAPTURE(struct gbm_device* gbm,
       }
     } else if (CAPTURE_queue->memory == V4L2_MEMORY_MMAP) {
       ret = request_mmap_buffers(CAPTURE_queue, &reqbuf);
-      for (uint32_t i = 0; i < reqbuf.count; i++) {
+      for (uint32_t i = 0; i < reqbuf.count; ++i) {
         queue_buffer_CAPTURE(CAPTURE_queue, i);
       }
     } else {
@@ -451,11 +524,35 @@ void write_file_to_disk(FILE* fp,
     size_t buffer_size = lseek(bo_fd, 0, SEEK_END);
     lseek(bo_fd, 0, SEEK_SET);
 
-    uint8_t* buffer = mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
+    uint8_t* buffer_nv12 =
+        mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
 
-    fwrite(buffer, buffer_size, 1, fp);
+    // Libvpx golden md5sums are calculated in I420 for VA-API case.
+    // Use |buffer_i420| to deinterleave |buffer_nv12| for this purpose.
+    const uint32_t width = CAPTURE_queue->image_width;
+    const uint32_t height = CAPTURE_queue->image_height;
+    const uint32_t stride = CAPTURE_queue->stride;
 
-    munmap(buffer, buffer_size);
+    const uint32_t buffer_i420_size_in_bytes = (width * height * 3) / 2;
+
+    uint8_t* buffer_i420 = malloc(sizeof(size_t) * buffer_i420_size_in_bytes);
+    assert(buffer_i420);
+    memset(buffer_i420, 0, sizeof(size_t) * buffer_i420_size_in_bytes);
+
+    nv12_to_i420(width, height, stride, buffer_nv12, buffer_i420);
+
+    // Write I420 data to yuv file for each frame.
+    fwrite(buffer_i420, buffer_i420_size_in_bytes, 1, fp);
+
+    // Print frame number together with md5sum for debugging purpose.
+    if (verbose_enabled)
+      printf("frame # %d - ", cnt);
+
+    compute_md5sum(buffer_i420, buffer_i420_size_in_bytes);
+
+    free(buffer_i420);
+
+    munmap(buffer_nv12, buffer_size);
   } else {
     if (CAPTURE_queue->num_planes == 1) {
       size_t buffer_size =
@@ -591,6 +688,7 @@ static void print_help(const char* argv0) {
   printf("  -m, --max         max number of frames to decode\n");
   printf("  -b, --buffer      use mmap instead of dmabuf\n");
   printf("  -o, --output_fmt  fourcc of output format\n");
+  printf("  -v, --verbose     print additional debugging info\n");
 }
 
 static const struct option longopts[] = {
@@ -600,6 +698,7 @@ static const struct option longopts[] = {
     {"max", required_argument, NULL, 'm'},
     {"buffer", no_argument, NULL, 'b'},
     {"output_fmt", no_argument, NULL, 'o'},
+    {"verbose", no_argument, NULL, 'v'},
     {0, 0, 0, 0},
 };
 
@@ -613,7 +712,7 @@ int main(int argc, char* argv[]) {
   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
   uint32_t uncompressed_fourcc = v4l2_fourcc('N', 'V', '1', '2');
   uint32_t CAPTURE_memory = V4L2_MEMORY_DMABUF;
-  while ((c = getopt_long(argc, argv, "wybm:f:o:", longopts, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "wybvm:f:o:", longopts, NULL)) != -1) {
     switch (c) {
       case 'f':
         file_name = strdup(optarg);
@@ -642,6 +741,9 @@ int main(int argc, char* argv[]) {
             modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
           }
         }
+        break;
+      case 'v':
+        verbose_enabled = true;
         break;
       default:
         break;
