@@ -66,7 +66,26 @@ static const struct bs_draw_format bs_draw_formats[] = {
 	    },
 	},
 	{
-	    PIXEL_FORMAT_AND_NAME(BGR888),
+	    PIXEL_FORMAT_AND_NAME(ABGR2101010),
+	    4,
+	    {
+		{ { 1.0f, 0.0f, 0.0f, 0.0f }, 0.0f, 1, 1, 4, 0, 0 },
+		{ { 0.0f, 1.0f, 0.0f, 0.0f }, 0.0f, 1, 1, 4, 0, 1 },
+		{ { 0.0f, 0.0f, 1.0f, 0.0f }, 0.0f, 1, 1, 4, 0, 2 },
+		{ { 0.0f, 0.0f, 0.0f, 1.0f }, 0.0f, 1, 1, 4, 0, 3 },
+	    },
+	},
+	{
+	    PIXEL_FORMAT_AND_NAME(ARGB2101010),
+	    4,
+	    {
+		{ { 0.0f, 0.0f, 1.0f, 0.0f }, 0.0f, 1, 1, 4, 0, 0 },
+		{ { 0.0f, 1.0f, 0.0f, 0.0f }, 0.0f, 1, 1, 4, 0, 1 },
+		{ { 1.0f, 0.0f, 0.0f, 0.0f }, 0.0f, 1, 1, 4, 0, 2 },
+		{ { 0.0f, 0.0f, 0.0f, 1.0f }, 0.0f, 1, 1, 4, 0, 3 },
+	    },
+	},
+	{	    PIXEL_FORMAT_AND_NAME(BGR888),
 	    3,
 	    {
 		{ { 1.0f, 0.0f, 0.0f }, 0.0f, 1, 1, 3, 0, 0 },
@@ -120,7 +139,24 @@ static const struct bs_draw_format bs_draw_formats[] = {
 	    },
 	},
 	{
-	    PIXEL_FORMAT_AND_NAME(UYVY),
+	    PIXEL_FORMAT_AND_NAME(XBGR2101010),
+	    3,
+	    {
+		{ { 1.0f, 0.0f, 0.0f }, 0.0f, 1, 1, 4, 0, 0 },
+		{ { 0.0f, 1.0f, 0.0f }, 0.0f, 1, 1, 4, 0, 1 },
+		{ { 0.0f, 0.0f, 1.0f }, 0.0f, 1, 1, 4, 0, 2 },
+	    },
+	},
+	{
+	    PIXEL_FORMAT_AND_NAME(XRGB2101010),
+	    3,
+	    {
+		{ { 0.0f, 0.0f, 1.0f }, 0.0f, 1, 1, 4, 0, 0 },
+		{ { 0.0f, 1.0f, 0.0f }, 0.0f, 1, 1, 4, 0, 1 },
+		{ { 1.0f, 0.0f, 0.0f }, 0.0f, 1, 1, 4, 0, 2 },
+	    },
+	},
+	{	    PIXEL_FORMAT_AND_NAME(UYVY),
 	    3,
 	    {
 		{ { -0.14822265625f, -0.2909921875f, 0.43921484375f }, 128.0f, 2, 1, 4, 0, 0 },
@@ -247,34 +283,61 @@ static bool draw_color(struct bs_mapper* mapper,
     }
   }
 
-  uint32_t color, samples, offset;
-  uint8_t* rows[MAX_COMPONENTS] = {0};
-  for (size_t comp_index = 0; comp_index < format->component_count;
-       comp_index++) {
-    const struct draw_format_component* comp = &format->components[comp_index];
-    struct draw_plane* plane = &planes[comp->plane_index];
+  // High bit depth formats (XR30 etc) have to be written word by word.
+  if (format->pixel_format == GBM_FORMAT_ABGR2101010 ||
+      format->pixel_format == GBM_FORMAT_ARGB2101010 ||
+      format->pixel_format == GBM_FORMAT_XRGB2101010 ||
+      format->pixel_format == GBM_FORMAT_XBGR2101010) {
+    assert(format->components[0].vertical_subsample_rate == 1);
+    assert(format->components[0].horizontal_subsample_rate == 1);
+    assert(format->component_count == 4 || format->component_count == 3);
+    assert(num_planes == 1);
 
-    for (uint32_t y = 0; y < height / comp->vertical_subsample_rate; y++) {
-      rows[comp_index] =
-          plane->ptr + comp->plane_offset + plane->row_stride * y;
+    for (uint32_t row = 0; row < height; ++row) {
+      for (uint32_t column = 0; column < width; ++column) {
+        uint32_t* const word_address =
+            (uint32_t*)(planes[0].ptr + row * planes[0].row_stride +
+                        4 * column);
+        const uint32_t converted_colors_index = row * width + column;
+        // Leftmost bits are alpha, then follow the colour channels.
+        *word_address =
+            (0x3 << 30) |
+            (((converted_colors[2][converted_colors_index]) & 0xFF) << 22) |
+            (((converted_colors[1][converted_colors_index]) & 0xFF) << 12) |
+            (((converted_colors[0][converted_colors_index]) & 0xFF) << 2);
+      }
+    }
+  } else {
+    uint32_t color, samples, offset;
+    uint8_t* rows[MAX_COMPONENTS] = {0};
+    for (size_t comp_index = 0; comp_index < format->component_count;
+         comp_index++) {
+      const struct draw_format_component* comp =
+          &format->components[comp_index];
+      struct draw_plane* plane = &planes[comp->plane_index];
 
-      for (uint32_t x = 0; x < width / comp->horizontal_subsample_rate; x++) {
-        offset = color = samples = 0;
+      for (uint32_t y = 0; y < height / comp->vertical_subsample_rate; y++) {
+        rows[comp_index] =
+            plane->ptr + comp->plane_offset + plane->row_stride * y;
 
-        for (uint32_t j = 0; j < comp->vertical_subsample_rate; j++) {
-          offset = (y * comp->vertical_subsample_rate + j) * width +
-                   x * comp->horizontal_subsample_rate;
-          for (uint32_t i = 0; i < comp->horizontal_subsample_rate; i++) {
-            color += converted_colors[comp_index][offset];
-            samples++;
-            offset++;
+        for (uint32_t x = 0; x < width / comp->horizontal_subsample_rate; x++) {
+          offset = color = samples = 0;
+
+          for (uint32_t j = 0; j < comp->vertical_subsample_rate; j++) {
+            offset = (y * comp->vertical_subsample_rate + j) * width +
+                     x * comp->horizontal_subsample_rate;
+            for (uint32_t i = 0; i < comp->horizontal_subsample_rate; i++) {
+              color += converted_colors[comp_index][offset];
+              samples++;
+              offset++;
+            }
           }
+          uint8_t* const byte_address = rows[comp_index] + x * comp->byte_skip;
+          if (bytes_per_pixel != 2u)
+            *byte_address = color / samples;
+          else  // This is for P010 and similar high-bit depth YUV formats.
+            *(uint16_t*)byte_address = (color / samples) << 8;
         }
-        uint8_t* const byte_address = rows[comp_index] + x * comp->byte_skip;
-        if (bytes_per_pixel != 2u)
-          *byte_address = color / samples;
-        else  // This is for P010 and similar high-bit depth YUV formats.
-          *(uint16_t*)byte_address = (color / samples) << 8;
       }
     }
   }
