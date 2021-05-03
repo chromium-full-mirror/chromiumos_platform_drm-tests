@@ -292,6 +292,7 @@ static bool parse_rect(const char* str,
 }
 
 static const struct option longopts[] = {
+    {"external", no_argument, NULL, 'e'},
     {"plane", no_argument, NULL, 'p'},
     {"format", required_argument, NULL, 'f'},
     {"size", required_argument, NULL, 'z'},
@@ -304,22 +305,21 @@ static const struct option longopts[] = {
 };
 
 static void print_help(const char* argv0) {
-  // clang-format off
-	printf("usage: %s [OPTIONS]\n", argv0);
-	printf("  -p, --plane               indicates that subsequent parameters are for a new plane\n");
-	printf("  -f, --format FOURCC       format of source buffer (defaults to NV12)\n");
-	printf("  -z, --size WIDTHxHEIGHT   size of the source buffer (defaults to screen size)\n");
-	printf("  -c, --scale DOWN/UP       scale plane over time between (1/DOWN)x and UPx\n");
-	printf("  -t, --translate           translate plane over time\n");
-	printf("  -s, --src RECT            source rectangle (defaults to full buffer)\n");
-	printf("  -d, --dst RECT            destination rectangle (defaults to buffer size centered in screen)\n");
-	printf("  -h, --help                show help\n");
-	printf("\n");
-	printf("The format of RECT arguments is X,Y or X,Y,WIDTH,HEIGHT or WIDTHxHEIGHT.\n");
-	printf("To test more than one plane, separate plane arguments with -p. For example:\n");
-	printf("  %s --format NV12 --size 400x400 -p --format XR24 --size 100x100 --translate\n", argv0);
-	printf("\n");
-  // clang-format on
+  printf("usage: %s [OPTIONS]\n", argv0);
+  printf("  -e, --external            prefer using the external connector (and not the eDP)\n");
+  printf("  -p, --plane               indicates that subsequent parameters are for a new plane\n");
+  printf("  -f, --format FOURCC       format of source buffer (defaults to NV12)\n");
+  printf("  -z, --size WIDTHxHEIGHT   size of the source buffer (defaults to screen size)\n");
+  printf("  -c, --scale DOWN/UP       scale plane over time between (1/DOWN)x and UPx\n");
+  printf("  -t, --translate           translate plane over time\n");
+  printf("  -s, --src RECT            source rectangle (defaults to full buffer)\n");
+  printf("  -d, --dst RECT            destination rectangle (defaults to buffer size centered in screen)\n");
+  printf("  -h, --help                show help\n");
+  printf("\n");
+  printf("The format of RECT arguments is X,Y or X,Y,WIDTH,HEIGHT or WIDTHxHEIGHT.\n");
+  printf("To test more than one plane, separate plane arguments with -p. For example:\n");
+  printf("  %s --format NV12 --size 400x400 -p --format XR24 --size 100x100 --translate\n", argv0);
+  printf("\n");
 }
 
 int main(int argc, char** argv) {
@@ -329,11 +329,15 @@ int main(int argc, char** argv) {
   struct test_plane test_planes[MAX_TEST_PLANES] = {{0}};
   uint32_t test_planes_formats[MAX_TEST_PLANES] = {0};
   uint32_t test_planes_ids[MAX_TEST_PLANES] = {0};
+  bool use_external_connectors = false;
 
   int c;
-  while ((c = getopt_long(argc, argv, "pf:z:c:ts:d:h", longopts, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "epf:z:c:ts:d:h", longopts, NULL)) != -1) {
     struct test_plane* current_plane = &test_planes[test_planes_count - 1];
     switch (c) {
+      case 'e':
+        use_external_connectors = true;
+        break;
       case 'p':
         test_planes_count++;
         if (test_planes_count > MAX_TEST_PLANES) {
@@ -390,7 +394,10 @@ int main(int argc, char** argv) {
   drmModeConnector* connector;
   struct bs_drm_pipe pipe = {0};
   struct bs_drm_pipe_plumber* plumber = bs_drm_pipe_plumber_new();
-  bs_drm_pipe_plumber_connector_ranks(plumber, bs_drm_connectors_internal_rank);
+  const uint32_t* connectors_ranked_list =
+      use_external_connectors ? bs_drm_connectors_external_rank
+                              : bs_drm_connectors_internal_rank;
+  bs_drm_pipe_plumber_connector_ranks(plumber, connectors_ranked_list);
   bs_drm_pipe_plumber_connector_ptr(plumber, &connector);
   if (!bs_drm_pipe_plumber_make(plumber, &pipe)) {
     bs_debug_error("failed to make pipe");
