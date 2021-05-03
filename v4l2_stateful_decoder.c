@@ -25,6 +25,7 @@
 static const char* kDecodeDevice = "/dev/video-dec0";
 static const int kInputbufferMaxSize = 4 * 1024 * 1024;
 static const int kRequestBufferCount = 8;
+static const int kTimestampMarkerForShowFrames = 1;
 static const uint32_t kIVFHeaderSignature = v4l2_fourcc('D', 'K', 'I', 'F');
 
 static bool verbose_enabled = false;
@@ -46,6 +47,8 @@ struct queue {
   uint32_t num_planes;
   uint32_t memory;
   uint32_t stride;
+  uint32_t processed_frames;
+  uint32_t displayed_frames;
 };
 
 struct ivf_file_header {
@@ -69,7 +72,6 @@ struct ivf_frame_header {
 struct compressed_file {
   FILE* fp;
   struct ivf_file_header header;
-  uint32_t submitted_frames;
 };
 
 void print_fourcc(uint32_t fourcc) {
@@ -203,8 +205,8 @@ int request_mmap_buffers(struct queue* queue,
 //
 // HW pads 0s for |stride - width| bytes after each row on Trogdor.
 // But other platforms might leave the padding uninitialized,
-// and in yet others accessing it might causes a crash of some sort (access
-// violation).
+// and in yet others accessing it might causes a crash of some sort
+// (access violation).
 void nv12_to_i420(uint32_t width,
                   uint32_t height,
                   uint32_t stride,
@@ -297,39 +299,69 @@ int setup_OUTPUT(struct queue* OUTPUT_queue) {
 
 int submit_compressed_frame(struct compressed_file* file,
                             struct queue* OUTPUT_queue,
-                            uint32_t index) {
+                            uint32_t queue_index,
+                            uint32_t frames_to_decode) {
   const uint32_t num = file->header.numerator;
   const uint32_t den = file->header.denominator;
+
+  if (OUTPUT_queue->displayed_frames >= frames_to_decode) {
+    if (verbose_enabled) {
+      printf(
+          "Already prepared requested number of frames |frames_to_decode|"
+          "from OUTPUT_queue.\n");
+    }
+
+    return 0;
+  }
 
   struct ivf_frame_header frame_header = {0};
 
   if (fread(&frame_header, sizeof(struct ivf_frame_header), 1, file->fp) != 1) {
     if (!feof(file->fp))
       fprintf(stderr, "unable to read ivf frame header\n");
-    else
+    else if (verbose_enabled)
       printf("unable to read ivf frame header, reached the end of ivf file\n");
 
     return -1;
   }
 
   struct mmap_buffers* buffers = OUTPUT_queue->buffers;
-  if (fread(buffers[index].start[0], sizeof(uint8_t), frame_header.size,
+  if (fread(buffers[queue_index].start[0], sizeof(uint8_t), frame_header.size,
             file->fp) != frame_header.size) {
     fprintf(stderr, "unable to read ivf frame data\n");
     return -1;
   }
 
+  // VP9 Bitstream and Decoding Process Specification
+  // Sec 6.2 "Uncompressed header syntax", pp.28.
+  // https://storage.googleapis.com/downloads.webmproject.org/docs/vp9/vp9-bitstream-specification-v0.6-20160331-draft.pdf
+  //
+  // |show_frame| is the second bit (counting from the least
+  // significant one) of the VP9 frame header's first byte.
+  const bool show_frame =
+      (*(uint32_t*)buffers[queue_index].start[0] & (1 << 1));
+
+  // Assumption here is that an non-displayed frame is always followed by a
+  // displayed frame. Please reference super-frame for more details.
+  // http://downloads.webmproject.org/docs/vp9/vp9-bitstream_superframe-and-uncompressed-header_v1.0.pdf
+  OUTPUT_queue->processed_frames++;
+  if (!show_frame)
+    OUTPUT_queue->processed_frames++;
+
   struct v4l2_buffer v4l2_buffer;
   struct v4l2_plane planes[VIDEO_MAX_PLANES];
+
   memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
-  v4l2_buffer.index = index;
+  v4l2_buffer.index = queue_index;
   v4l2_buffer.type = OUTPUT_queue->type;
   v4l2_buffer.memory = OUTPUT_queue->memory;
   v4l2_buffer.length = 1;
-  v4l2_buffer.timestamp.tv_sec = 0;
+  // Intentionally starting timestamp |kTimestampMarkerForShowFrames| at 1
+  // so that we can detect non-displayed frames with simpler logic.
+  v4l2_buffer.timestamp.tv_sec = kTimestampMarkerForShowFrames;
   v4l2_buffer.timestamp.tv_usec = ((frame_header.timestamp * den) / num) * 100;
   v4l2_buffer.m.planes = planes;
-  v4l2_buffer.m.planes[0].length = buffers[index].length[0];
+  v4l2_buffer.m.planes[0].length = buffers[queue_index].length[0];
   v4l2_buffer.m.planes[0].bytesused = frame_header.size;
   v4l2_buffer.m.planes[0].data_offset = 0;
   int ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
@@ -338,16 +370,20 @@ int submit_compressed_frame(struct compressed_file* file,
     return -1;
   }
 
-  file->submitted_frames++;
+  // Counts processed displayed frames in OUTPUT_queue. Non-displayed frames
+  // are not counted as non-displayed frame is a part of a super-frame.
+  OUTPUT_queue->displayed_frames++;
 
   return 0;
 }
 
-int prime_OUTPUT(struct compressed_file* file, struct queue* OUTPUT_queue) {
+int prime_OUTPUT(struct compressed_file* file,
+                 struct queue* OUTPUT_queue,
+                 uint32_t frames_to_decode) {
   int ret = 0;
 
   for (uint32_t i = 0; i < OUTPUT_queue->cnt; ++i) {
-    ret = submit_compressed_frame(file, OUTPUT_queue, i);
+    ret = submit_compressed_frame(file, OUTPUT_queue, i, frames_to_decode);
     if (ret)
       break;
   }
@@ -516,10 +552,11 @@ int setup_CAPTURE(struct gbm_device* gbm,
 
 void write_file_to_disk(FILE* fp,
                         struct queue* CAPTURE_queue,
-                        uint32_t index,
-                        uint32_t cnt) {
+                        uint32_t queue_index,
+                        uint32_t frame_index,
+                        bool show_frame) {
   if (V4L2_MEMORY_DMABUF == CAPTURE_queue->memory) {
-    struct gbm_bo* bo = CAPTURE_queue->buffers[index].bo;
+    struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
     int bo_fd = gbm_bo_get_fd(bo);
     size_t buffer_size = lseek(bo_fd, 0, SEEK_END);
     lseek(bo_fd, 0, SEEK_SET);
@@ -544,11 +581,15 @@ void write_file_to_disk(FILE* fp,
     // Write I420 data to yuv file for each frame.
     fwrite(buffer_i420, buffer_i420_size_in_bytes, 1, fp);
 
-    // Print frame number together with md5sum for debugging purpose.
     if (verbose_enabled)
-      printf("frame # %d - ", cnt);
+      printf("show_frame in CAPTURE_queue = %d\n", show_frame);
 
-    compute_md5sum(buffer_i420, buffer_i420_size_in_bytes);
+    // md5sum value is computed only for displayed frames.
+    if (show_frame) {
+      if (verbose_enabled)
+        printf("frame # %d - ", frame_index);
+      compute_md5sum(buffer_i420, buffer_i420_size_in_bytes);
+    }
 
     free(buffer_i420);
 
@@ -557,14 +598,14 @@ void write_file_to_disk(FILE* fp,
     if (CAPTURE_queue->num_planes == 1) {
       size_t buffer_size =
           (3 * CAPTURE_queue->image_width * CAPTURE_queue->image_height) >> 1;
-      uint8_t* buffer = CAPTURE_queue->buffers[index].start[0];
+      uint8_t* buffer = CAPTURE_queue->buffers[queue_index].start[0];
 
       fwrite(buffer, buffer_size, 1, fp);
     } else {
       for (uint32_t i = 0; i < CAPTURE_queue->num_planes; ++i) {
         size_t buffer_size =
             (CAPTURE_queue->image_width * CAPTURE_queue->image_height) >> i;
-        uint8_t* buffer = CAPTURE_queue->buffers[index].start[i];
+        uint8_t* buffer = CAPTURE_queue->buffers[queue_index].start[i];
 
         fwrite(buffer, buffer_size, 1, fp);
       }
@@ -572,7 +613,10 @@ void write_file_to_disk(FILE* fp,
   }
 }
 
-int dequeue_buffer(struct queue* queue, uint32_t* index) {
+int dequeue_buffer(struct queue* queue,
+                   uint32_t* index,
+                   uint32_t* flags,
+                   bool* show_frame) {
   struct v4l2_buffer v4l2_buffer;
   struct v4l2_plane planes[VIDEO_MAX_PLANES] = {0};
   memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
@@ -583,6 +627,15 @@ int dequeue_buffer(struct queue* queue, uint32_t* index) {
   int ret = ioctl(queue->v4lfd, VIDIOC_DQBUF, &v4l2_buffer);
 
   *index = v4l2_buffer.index;
+  *flags = v4l2_buffer.flags;
+
+  // For displayed frames, timestamp values will be increasing for each
+  // frame starting from 1 (which can be configured differently for the
+  // first frame). For non-displayed frames, timestamp values will be 0.
+  // Thus, this info can be used to distinguish non-displayed frames
+  // from displayed frames.
+  *show_frame = !(v4l2_buffer.timestamp.tv_sec < kTimestampMarkerForShowFrames);
+
   return ret;
 }
 
@@ -597,8 +650,6 @@ int decode(struct compressed_file* file,
   int ret = 0;
 
   if (!ret) {
-    uint32_t cnt = 0;
-
     FILE* fp_frame;
     FILE* fp_file;
     char filename_frame[256];
@@ -615,10 +666,12 @@ int decode(struct compressed_file* file,
       }
     }
 
-    while (cnt < frames_to_decode) {
+    while (CAPTURE_queue->processed_frames < OUTPUT_queue->processed_frames) {
       {
         uint32_t index = 0;
-        ret = dequeue_buffer(CAPTURE_queue, &index);
+        uint32_t flags = 0;
+        bool show_frame;
+        ret = dequeue_buffer(CAPTURE_queue, &index, &flags, &show_frame);
         if (ret != 0) {
           if (errno != EAGAIN)
             perror("VIDIOC_DQBUF failed");
@@ -627,7 +680,8 @@ int decode(struct compressed_file* file,
 
         if (write_out_individual_frames) {
           sprintf(filename_frame, "image_%dx%d_%d.yuv",
-                  CAPTURE_queue->image_width, CAPTURE_queue->image_height, cnt);
+                  CAPTURE_queue->image_width, CAPTURE_queue->image_height,
+                  CAPTURE_queue->processed_frames);
           fp_frame = fopen(filename_frame, "wb");
 
           if (!fp_frame) {
@@ -636,13 +690,20 @@ int decode(struct compressed_file* file,
             ret = 1;
             break;
           } else {
-            write_file_to_disk(fp_frame, CAPTURE_queue, index, cnt);
+            write_file_to_disk(fp_frame, CAPTURE_queue, index,
+                               CAPTURE_queue->processed_frames, show_frame);
           }
         }
 
         if (write_out_file) {
-          write_file_to_disk(fp_file, CAPTURE_queue, index, cnt);
+          write_file_to_disk(fp_file, CAPTURE_queue, index,
+                             CAPTURE_queue->processed_frames, show_frame);
         }
+
+        if (show_frame)
+          CAPTURE_queue->displayed_frames++;
+
+        CAPTURE_queue->processed_frames++;
 
         // Done with buffer, queue it back up.
         ret = queue_buffer_CAPTURE(CAPTURE_queue, index);
@@ -652,17 +713,17 @@ int decode(struct compressed_file* file,
       // now be a free OUTPUT buffer.
       {
         uint32_t index = 0;
-        ret = dequeue_buffer(OUTPUT_queue, &index);
+        uint32_t flags = 0;
+        bool show_frame;
+        ret = dequeue_buffer(OUTPUT_queue, &index, &flags, &show_frame);
         if (ret != 0) {
           if (errno != EAGAIN)
             perror("VIDIOC_DQBUF failed");
           continue;
         }
 
-        if (submit_compressed_frame(file, OUTPUT_queue, index))
-          break;
+        submit_compressed_frame(file, OUTPUT_queue, index, frames_to_decode);
       }
-      cnt++;
 
       if (write_out_individual_frames)
         fclose(fp_frame);
@@ -671,7 +732,9 @@ int decode(struct compressed_file* file,
     if (write_out_file)
       fclose(fp_file);
 
-    printf("%d frames decoded.\n", cnt);
+    printf("%d frames decoded, %d displayable, %d non-visible.\n",
+           CAPTURE_queue->processed_frames, CAPTURE_queue->displayed_frames,
+           CAPTURE_queue->processed_frames - CAPTURE_queue->displayed_frames);
   }
 
   return ret;
@@ -685,7 +748,7 @@ static void print_help(const char* argv0) {
       "files\n");
   printf(
       "  -y, --output_yuv  write out decompressed frames to a single file\n");
-  printf("  -m, --max         max number of frames to decode\n");
+  printf("  -m, --max         max number of visible frames to decode\n");
   printf("  -b, --buffer      use mmap instead of dmabuf\n");
   printf("  -o, --output_fmt  fourcc of output format\n");
   printf("  -v, --verbose     print additional debugging info\n");
@@ -712,6 +775,7 @@ int main(int argc, char* argv[]) {
   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
   uint32_t uncompressed_fourcc = v4l2_fourcc('N', 'V', '1', '2');
   uint32_t CAPTURE_memory = V4L2_MEMORY_DMABUF;
+
   while ((c = getopt_long(argc, argv, "wybvm:f:o:", longopts, NULL)) != -1) {
     switch (c) {
       case 'f':
@@ -790,17 +854,21 @@ int main(int argc, char* argv[]) {
                                .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
                                .fourcc = compressed_file.header.fourcc,
                                .num_planes = 1,
-                               .memory = V4L2_MEMORY_MMAP};
+                               .memory = V4L2_MEMORY_MMAP,
+                               .processed_frames = 0,
+                               .displayed_frames = 0};
   int ret = setup_OUTPUT(&OUTPUT_queue);
 
   if (!ret)
-    ret = prime_OUTPUT(&compressed_file, &OUTPUT_queue);
+    ret = prime_OUTPUT(&compressed_file, &OUTPUT_queue, frames_to_decode);
 
   struct queue CAPTURE_queue = {.v4lfd = v4lfd,
                                 .type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                                 .fourcc = uncompressed_fourcc,
                                 .num_planes = 1,
-                                .memory = CAPTURE_memory};
+                                .memory = CAPTURE_memory,
+                                .processed_frames = 0,
+                                .displayed_frames = 0};
   if (!ret)
     ret = setup_CAPTURE(gbm, &CAPTURE_queue, modifier);
 
