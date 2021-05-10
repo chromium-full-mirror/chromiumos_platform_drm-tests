@@ -242,4 +242,11 @@ uint32_t bs_drm_find_property_id(int fd, uint32_t object_id, uint32_t object_typ
 unsigned int bs_get_crtc_bitmask(int fd, uint32_t crtc_id);
 uint32_t bs_get_plane_id(int fd, uint32_t crtc_id);
 
+// alloc.c
+// Checked allocation functions that abort on failure.
+void *xmalloc(size_t size);
+void *xcalloc(size_t n, size_t size);
+void *xrealloc(void *ptr, size_t size);
+char *xstrdup(const char *s);
+
 #endif

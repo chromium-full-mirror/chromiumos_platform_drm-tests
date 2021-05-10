@@ -8,6 +8,7 @@ CFLAGS += -std=gnu99 -I$(SRC)/bsdrm/include
 
 CC_STATIC_LIBRARY(libbsdrm.pic.a): \
   bsdrm/src/app.o \
+  bsdrm/src/alloc.o \
   bsdrm/src/debug.o \
   bsdrm/src/draw.o \
   bsdrm/src/drm_connectors.o \
