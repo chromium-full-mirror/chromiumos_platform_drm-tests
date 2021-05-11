@@ -41,12 +41,18 @@ struct queue {
   enum v4l2_buf_type type;
   uint32_t fourcc;
   struct mmap_buffers* buffers;
-  uint32_t image_width;
-  uint32_t image_height;
+  // |display_width| x |display_height|:
+  // The size of the image on the screen.
+  uint32_t display_width;
+  uint32_t display_height;
+  // |coded_width| x |coded_height|:
+  // The size of the encoded frame.
+  // Usually has an alignment of 16, 32 depending on codec.
+  uint32_t coded_width;
+  uint32_t coded_height;
   uint32_t cnt;
   uint32_t num_planes;
   uint32_t memory;
-  uint32_t stride;
   uint32_t processed_frames;
   uint32_t displayed_frames;
 };
@@ -98,6 +104,8 @@ struct compressed_file open_file(const char* file_name) {
     file.fp = fp;
     print_fourcc(file.header.fourcc);
     printf("ivf file header: %d x %d\n", file.header.width, file.header.height);
+    assert((file.header.width % 2) == 0);
+    assert((file.header.height % 2) == 0);
     printf("ivf file header: frame_cnt = %d\n", file.header.frame_cnt);
   } else {
     fprintf(stderr, "unable to open file: %s\n", file_name);
@@ -196,40 +204,41 @@ int request_mmap_buffers(struct queue* queue,
 // NV12 to I420 conversion.
 // This function converts the NV12 |buffer_in| into an I420 |buffer_out|.
 // |buffer_in| is padded, whereas |buffer_out| is tightly packed.
-// Example with width = 8, height = 2, stride = 10.
+// Example: |display_width| = 8, |display_height| = 2, |buffer_width| = 10.
 //
 // NV12           I420
 // YYYYYYYY00     YYYYYYYY
 // YYYYYYYY00     YYYYYYYY
 // UVUVUVUV00     UUUUVVVV
 //
-// HW pads 0s for |stride - width| bytes after each row on Trogdor.
-// But other platforms might leave the padding uninitialized,
-// and in yet others accessing it might causes a crash of some sort
-// (access violation).
-void nv12_to_i420(uint32_t width,
-                  uint32_t height,
-                  uint32_t stride,
+// HW pads 0s for |buffer_width - display_width| bytes after each row on
+// Trogdor. But other platforms might leave the padding uninitialized, and in
+// yet others accessing it might causes a crash of some sort (access violation).
+void nv12_to_i420(uint32_t display_width,
+                  uint32_t display_height,
+                  uint32_t buffer_width,
+                  uint32_t buffer_height,
                   uint8_t* buffer_in,
                   uint8_t* buffer_out) {
   // Copy luma data from |buffer_in| one row at a time
   // to avoid touching the padding.
-  for (int row = 0; row < height; ++row)
-    memcpy(buffer_out + row * width, buffer_in + row * stride, width);
+  for (int row = 0; row < display_height; ++row)
+    memcpy(buffer_out + row * display_width, buffer_in + row * buffer_width,
+           display_width);
 
-  const size_t y_plane_size = width * height;
+  const size_t y_plane_size = display_width * display_height;
   const size_t u_plane_size = y_plane_size / 4;
   uint8_t* u_plane_out = &buffer_out[y_plane_size];
   uint8_t* v_plane_out = u_plane_out + u_plane_size;
-  const size_t uv_plane_offset = stride * height;
+  const size_t uv_plane_offset = buffer_width * buffer_height;
 
-  for (int row = 0; row < height / 2; ++row) {
-    for (int column = 0; column < width / 2; ++column) {
-      *(u_plane_out + row * width / 2 + column) =
-          buffer_in[uv_plane_offset + row * stride + 2 * column];
+  for (int row = 0; row < display_height / 2; ++row) {
+    for (int column = 0; column < display_width / 2; ++column) {
+      *(u_plane_out + row * display_width / 2 + column) =
+          buffer_in[uv_plane_offset + row * buffer_width + 2 * column];
 
-      *(v_plane_out + row * width / 2 + column) =
-          buffer_in[uv_plane_offset + row * stride + 2 * column + 1];
+      *(v_plane_out + row * display_width / 2 + column) =
+          buffer_in[uv_plane_offset + row * buffer_width + 2 * column + 1];
     }
   }
 }
@@ -458,17 +467,12 @@ int setup_CAPTURE(struct gbm_device* gbm,
     if (ret != 0)
       perror("VIDIOC_G_FMT failed");
 
-    CAPTURE_queue->image_width = fmt.fmt.pix_mp.width;
-    CAPTURE_queue->image_height = fmt.fmt.pix_mp.height;
+    CAPTURE_queue->coded_width = fmt.fmt.pix_mp.width;
+    CAPTURE_queue->coded_height = fmt.fmt.pix_mp.height;
     CAPTURE_queue->num_planes = fmt.fmt.pix_mp.num_planes;
 
     printf("CAPTURE: %d x %d\n", fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height);
     printf("num_planes = %d\n", fmt.fmt.pix_mp.num_planes);
-
-    // Only Y stride is needed on Trogdor.
-    CAPTURE_queue->stride = fmt.fmt.pix_mp.plane_fmt[0].bytesperline;
-    if (verbose_enabled)
-      printf("plane 0, stride = %d\n", CAPTURE_queue->stride);
   }
 
   // 4. Optional. Set the CAPTURE format via VIDIOC_S_FMT() on the CAPTURE
@@ -481,8 +485,8 @@ int setup_CAPTURE(struct gbm_device* gbm,
     fmt.type = CAPTURE_queue->type;
     fmt.fmt.pix_mp.pixelformat = CAPTURE_queue->fourcc;
 
-    fmt.fmt.pix_mp.width = CAPTURE_queue->image_width;
-    fmt.fmt.pix_mp.height = CAPTURE_queue->image_height;
+    fmt.fmt.pix_mp.width = CAPTURE_queue->coded_width;
+    fmt.fmt.pix_mp.height = CAPTURE_queue->coded_height;
 
     ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_FMT, &fmt);
     if (ret != 0)
@@ -513,8 +517,8 @@ int setup_CAPTURE(struct gbm_device* gbm,
       CAPTURE_queue->cnt = reqbuf.count;
 
       for (uint32_t i = 0; i < CAPTURE_queue->cnt; ++i) {
-        const uint32_t width = CAPTURE_queue->image_width;
-        const uint32_t height = CAPTURE_queue->image_height;
+        const uint32_t width = CAPTURE_queue->coded_width;
+        const uint32_t height = CAPTURE_queue->coded_height;
 
         struct gbm_bo* bo = gbm_bo_create_with_modifiers(
             gbm, width, height, GBM_FORMAT_NV12, &modifier, 1);
@@ -561,22 +565,34 @@ void write_file_to_disk(FILE* fp,
     size_t buffer_size = lseek(bo_fd, 0, SEEK_END);
     lseek(bo_fd, 0, SEEK_SET);
 
+    assert(gbm_bo_get_stride_for_plane(bo, 0) ==
+           gbm_bo_get_stride_for_plane(bo, 1));
+
     uint8_t* buffer_nv12 =
         mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
 
     // Libvpx golden md5sums are calculated in I420 for VA-API case.
     // Use |buffer_i420| to deinterleave |buffer_nv12| for this purpose.
-    const uint32_t width = CAPTURE_queue->image_width;
-    const uint32_t height = CAPTURE_queue->image_height;
-    const uint32_t stride = CAPTURE_queue->stride;
+    const uint32_t display_width = CAPTURE_queue->display_width;
+    const uint32_t display_height = CAPTURE_queue->display_height;
+    // |buffer_width| x |buffer_height|:
+    // The size of the buffer that the frame will be stored in.
+    // Usually the driver has limitations on alignment depending on HW.
+    const uint32_t buffer_width = gbm_bo_get_stride_for_plane(bo, 0);
+    const uint32_t buffer_height = gbm_bo_get_height(bo);
 
-    const uint32_t buffer_i420_size_in_bytes = (width * height * 3) / 2;
+    assert(display_width <= buffer_width);
+    assert(display_height <= buffer_height);
+
+    const uint32_t buffer_i420_size_in_bytes =
+        (display_width * display_height * 3) / 2;
 
     uint8_t* buffer_i420 = malloc(sizeof(size_t) * buffer_i420_size_in_bytes);
     assert(buffer_i420);
     memset(buffer_i420, 0, sizeof(size_t) * buffer_i420_size_in_bytes);
 
-    nv12_to_i420(width, height, stride, buffer_nv12, buffer_i420);
+    nv12_to_i420(display_width, display_height, buffer_width, buffer_height,
+                 buffer_nv12, buffer_i420);
 
     // Write I420 data to yuv file for each frame.
     fwrite(buffer_i420, buffer_i420_size_in_bytes, 1, fp);
@@ -597,14 +613,14 @@ void write_file_to_disk(FILE* fp,
   } else {
     if (CAPTURE_queue->num_planes == 1) {
       size_t buffer_size =
-          (3 * CAPTURE_queue->image_width * CAPTURE_queue->image_height) >> 1;
+          (3 * CAPTURE_queue->coded_width * CAPTURE_queue->coded_height) >> 1;
       uint8_t* buffer = CAPTURE_queue->buffers[queue_index].start[0];
 
       fwrite(buffer, buffer_size, 1, fp);
     } else {
       for (uint32_t i = 0; i < CAPTURE_queue->num_planes; ++i) {
         size_t buffer_size =
-            (CAPTURE_queue->image_width * CAPTURE_queue->image_height) >> i;
+            (CAPTURE_queue->coded_width * CAPTURE_queue->coded_height) >> i;
         uint8_t* buffer = CAPTURE_queue->buffers[queue_index].start[i];
 
         fwrite(buffer, buffer_size, 1, fp);
@@ -680,7 +696,7 @@ int decode(struct compressed_file* file,
 
         if (write_out_individual_frames) {
           sprintf(filename_frame, "image_%dx%d_%d.yuv",
-                  CAPTURE_queue->image_width, CAPTURE_queue->image_height,
+                  CAPTURE_queue->display_width, CAPTURE_queue->display_height,
                   CAPTURE_queue->processed_frames);
           fp_frame = fopen(filename_frame, "wb");
 
@@ -867,6 +883,8 @@ int main(int argc, char* argv[]) {
                                 .fourcc = uncompressed_fourcc,
                                 .num_planes = 1,
                                 .memory = CAPTURE_memory,
+                                .display_width = compressed_file.header.width,
+                                .display_height = compressed_file.header.height,
                                 .processed_frames = 0,
                                 .displayed_frames = 0};
   if (!ret)
