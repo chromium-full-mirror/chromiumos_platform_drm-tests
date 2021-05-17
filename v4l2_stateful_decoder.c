@@ -220,7 +220,7 @@ int request_mmap_buffers(struct queue* queue,
     buffer.m.planes = planes;
     ret = ioctl(v4lfd, VIDIOC_QUERYBUF, &buffer);
     if (ret != 0) {
-      LOG_ERROR("VIDIOC_QUERYBUF failed: %d\n", ret);
+      LOG_ERROR("VIDIOC_QUERYBUF failed: %d", ret);
       break;
     }
 
@@ -670,6 +670,7 @@ void write_file_to_disk(FILE* fp,
 
 int dequeue_buffer(struct queue* queue,
                    uint32_t* index,
+                   uint32_t* bytesused,
                    uint32_t* flags,
                    bool* show_frame) {
   struct v4l2_buffer v4l2_buffer;
@@ -681,15 +682,93 @@ int dequeue_buffer(struct queue* queue,
   v4l2_buffer.m.planes[0].bytesused = 0;
   int ret = ioctl(queue->v4lfd, VIDIOC_DQBUF, &v4l2_buffer);
 
-  *index = v4l2_buffer.index;
-  *flags = v4l2_buffer.flags;
+  if (index)
+    *index = v4l2_buffer.index;
+  if (bytesused)
+    *bytesused = v4l2_buffer.m.planes[0].bytesused;
+  if (flags)
+    *flags = v4l2_buffer.flags;
 
   // For displayed frames, timestamp values will be increasing for each
   // frame starting from 1 (which can be configured differently for the
   // first frame). For non-displayed frames, timestamp values will be 0.
   // Thus, this info can be used to distinguish non-displayed frames
   // from displayed frames.
-  *show_frame = !(v4l2_buffer.timestamp.tv_sec < kTimestampMarkerForShowFrames);
+  if (show_frame) {
+    *show_frame =
+        !(v4l2_buffer.timestamp.tv_sec < kTimestampMarkerForShowFrames);
+  }
+
+  return ret;
+}
+
+// 4.5.1.10. Drain
+// https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/dev-decoder.html#drain
+int drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
+  // 1. Begin the drain sequence by issuing VIDIOC_DECODER_CMD().
+  struct v4l2_decoder_cmd cmd;
+  memset(&cmd, 0, sizeof(cmd));
+  cmd.cmd = V4L2_DEC_CMD_STOP;
+
+  // V4L2_DEC_CMD_STOP may not be supported, but we haven't run into
+  // a driver that doesn't support V4L2_DEC_CMD_STOP cmd.
+  int ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_DECODER_CMD, &cmd);
+  assert(ret == 0);
+
+  // 2. Dequeue buffers
+  // The way the decode loop is set up, there shouldn't be any buffers
+  // left to dequeue.
+  {
+    uint32_t bytesused = 0;
+    uint32_t flags = 0;
+    const int kMaxDrainDelay = 2048;
+    // Checks to make sure the queue is empty.
+    // It takes time to execute V4L2_DEC_CMD_STOP cmd.
+    // From experiments, iterating |kMaxDrainDelay| times
+    // was good enough to get V4L2_BUF_FLAG_LAST flag.
+    int counter;
+    for (counter = kMaxDrainDelay; counter > 0; ++counter) {
+      ret = dequeue_buffer(CAPTURE_queue, NULL, &bytesused, &flags, NULL);
+
+      if (ret == 0) {
+        break;
+      } else {
+        if (errno != EAGAIN)
+          LOG_ERROR("VIDIOC_DQBUF failed: %s", strerror(errno));
+      }
+    }
+
+    if (counter == 0) {
+      LOG_ERROR(
+          "V4L2_DEC_CMD_STOP cmd execution was not completed within %d "
+          "iterations.\n",
+          kMaxDrainDelay);
+      ret = 1;
+    }
+
+    const bool is_v4l2_buf_last_flag_set = flags & V4L2_BUF_FLAG_LAST;
+    LOG_INFO("V4L2_BUF_FLAG_LAST = %d \n", is_v4l2_buf_last_flag_set);
+
+    if (!is_v4l2_buf_last_flag_set && (bytesused != 0)) {
+      LOG_ERROR("WARNING: CAPTURE queue did not clean up.\n");
+      ret = 1;
+    }
+  }
+
+  // 3. Reset by issuing VIDIOC_STREAMOFF
+  int ret_streamoff =
+      ioctl(OUTPUT_queue->v4lfd, VIDIOC_STREAMOFF, &OUTPUT_queue->type);
+  if (ret_streamoff != 0) {
+    LOG_ERROR("VIDIOC_STREAMOFF failed on OUTPUT: %s", strerror(errno));
+    ret = ret_streamoff;
+  }
+
+  ret_streamoff =
+      ioctl(CAPTURE_queue->v4lfd, VIDIOC_STREAMOFF, &CAPTURE_queue->type);
+  if (ret_streamoff != 0) {
+    LOG_ERROR("VIDIOC_STREAMOFF failed on CAPTURE: %s", strerror(errno));
+    ret = ret_streamoff;
+  }
 
   return ret;
 }
@@ -698,7 +777,6 @@ int decode(struct compressed_file* file,
            struct queue* CAPTURE_queue,
            struct queue* OUTPUT_queue,
            uint64_t modifier,
-           bool write_out,
            FILE* output_file,
            uint32_t frames_to_decode,
            bool print_md5hash) {
@@ -708,16 +786,15 @@ int decode(struct compressed_file* file,
     while (CAPTURE_queue->processed_frames < OUTPUT_queue->processed_frames) {
       {
         uint32_t index = 0;
-        uint32_t flags = 0;
         bool show_frame;
-        ret = dequeue_buffer(CAPTURE_queue, &index, &flags, &show_frame);
+        ret = dequeue_buffer(CAPTURE_queue, &index, NULL, NULL, &show_frame);
         if (ret != 0) {
           if (errno != EAGAIN)
             LOG_ERROR("VIDIOC_DQBUF failed: %s", strerror(errno));
           continue;
         }
 
-        if (write_out) {
+        if (output_file) {
           write_file_to_disk(output_file, CAPTURE_queue, index,
                              CAPTURE_queue->processed_frames, show_frame);
         }
@@ -745,9 +822,7 @@ int decode(struct compressed_file* file,
       // now be a free OUTPUT buffer.
       {
         uint32_t index = 0;
-        uint32_t flags = 0;
-        bool show_frame;
-        ret = dequeue_buffer(OUTPUT_queue, &index, &flags, &show_frame);
+        ret = dequeue_buffer(OUTPUT_queue, &index, NULL, NULL, NULL);
         if (ret != 0) {
           if (errno != EAGAIN)
             LOG_ERROR("VIDIOC_DQBUF failed: %s", strerror(errno));
@@ -757,6 +832,8 @@ int decode(struct compressed_file* file,
         submit_compressed_frame(file, OUTPUT_queue, index, frames_to_decode);
       }
     }
+
+    drain(OUTPUT_queue, CAPTURE_queue);
 
     LOG_INFO("%d frames decoded, %d displayable, %d non-visible.\n",
              CAPTURE_queue->processed_frames, CAPTURE_queue->displayed_frames,
@@ -874,7 +951,7 @@ int main(int argc, char* argv[]) {
   if (!compressed_file.fp)
     LOG_FATAL("Unable to open ivf file: %s\n", file_name);
 
-  FILE* output_file;
+  FILE* output_file = NULL;
 
   if (write_out) {
     // Replaces |.ivf| with |.yuv| in |file_name|.
@@ -920,9 +997,13 @@ int main(int argc, char* argv[]) {
   if (!ret)
     ret = setup_CAPTURE(gbm, &CAPTURE_queue, modifier);
 
-  if (!ret)
+  if (!ret) {
     ret = decode(&compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
-                 write_out, output_file, frames_to_decode, print_md5hash);
+                 output_file, frames_to_decode, print_md5hash);
+  }
+
+  if (ret)
+    LOG_ERROR("|decode| function has returned value %d.\n", ret);
 
   if (write_out)
     fclose(output_file);
