@@ -105,6 +105,10 @@ struct compressed_file {
   struct ivf_file_header header;
 };
 
+struct md5_hash {
+  uint8_t bytes[16];
+};
+
 void fourcc_to_string(uint32_t fourcc, char* fourcc_string) {
   sprintf(fourcc_string, "%c%c%c%c", fourcc & 0xff, fourcc >> 8 & 0xff,
           fourcc >> 16 & 0xff, fourcc >> 24 & 0xff);
@@ -135,7 +139,7 @@ struct compressed_file open_file(const char* file_name) {
     LOG_INFO("ivf file header: %d x %d\n", file.header.width,
              file.header.height);
     // |width| and |height| should be even numbers.
-    // This is because nv12 to i420 conversion (needed for md5sum computation)
+    // This is because nv12 to i420 conversion (needed for md5hash computation)
     // assumes |width| and |height| to be even numbers.
     assert((file.header.width % 2) == 0);
     assert((file.header.height % 2) == 0);
@@ -254,7 +258,7 @@ void nv12_to_i420(uint32_t display_width,
                   uint32_t buffer_height,
                   uint8_t* buffer_in,
                   uint8_t* buffer_out) {
-  // Copy luma data from |buffer_in| one row at a time
+  // Copies luma data from |buffer_in| one row at a time
   // to avoid touching the padding.
   for (int row = 0; row < display_height; ++row)
     memcpy(buffer_out + row * display_width, buffer_in + row * buffer_width,
@@ -277,19 +281,56 @@ void nv12_to_i420(uint32_t display_width,
   }
 }
 
-// Compute md5sum for each frame.
-void compute_md5sum(uint8_t* buffer_i420, uint32_t output_size) {
-  int n;
-  uint8_t out[16];
+// Computes md5 hash for each frame.
+struct md5_hash compute_md5hash(struct queue* CAPTURE_queue,
+                                uint32_t queue_index) {
+  // TODO: needs to handle V4L2_MEMORY_MMAP case
+  assert(CAPTURE_queue->memory == V4L2_MEMORY_DMABUF);
+
+  struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
+  int bo_fd = gbm_bo_get_fd(bo);
+  size_t buffer_size = lseek(bo_fd, 0, SEEK_END);
+  lseek(bo_fd, 0, SEEK_SET);
+
+  assert(gbm_bo_get_stride_for_plane(bo, 0) ==
+         gbm_bo_get_stride_for_plane(bo, 1));
+
+  uint8_t* buffer_nv12 = mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
+
+  // Libvpx golden md5 hashes are calculated in I420 format.
+  // Uses |buffer_i420| to deinterleave |buffer_nv12| for this purpose.
+  const uint32_t display_width = CAPTURE_queue->display_width;
+  const uint32_t display_height = CAPTURE_queue->display_height;
+  // buffer w x h :
+  // The size of the buffer that the frame will be stored in.
+  // Usually the driver has limitations on alignment depending on HW.
+  const uint32_t buffer_width = gbm_bo_get_stride_for_plane(bo, 0);
+  const uint32_t buffer_height = gbm_bo_get_height(bo);
+
+  assert(buffer_width * buffer_height <= buffer_size);
+
+  const uint32_t buffer_i420_size_in_bytes =
+      (display_width * display_height * 3) / 2;
+
+  uint8_t* buffer_i420 = malloc(sizeof(size_t) * buffer_i420_size_in_bytes);
+  assert(buffer_i420);
+  memset(buffer_i420, 0, sizeof(size_t) * buffer_i420_size_in_bytes);
+
+  nv12_to_i420(display_width, display_height, buffer_width, buffer_height,
+               buffer_nv12, buffer_i420);
+
+  struct md5_hash hash;
 
   MD5_CTX ctx;
   MD5_Init(&ctx);
-  MD5_Update(&ctx, buffer_i420, output_size);
-  MD5_Final(out, &ctx);
+  MD5_Update(&ctx, buffer_i420, buffer_i420_size_in_bytes);
+  MD5_Final(hash.bytes, &ctx);
 
-  for (n = 0; n < 16; ++n)
-    printf("%02x", out[n]);  // md5sum value for each frame
-  printf("\n");
+  free(buffer_i420);
+
+  munmap(buffer_nv12, buffer_size);
+
+  return hash;
 }
 
 // this is the input queue that will take compressed data
@@ -605,41 +646,7 @@ void write_file_to_disk(FILE* fp,
     uint8_t* buffer_nv12 =
         mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
 
-    // Libvpx golden md5sums are calculated in I420 for VA-API case.
-    // Use |buffer_i420| to deinterleave |buffer_nv12| for this purpose.
-    const uint32_t display_width = CAPTURE_queue->display_width;
-    const uint32_t display_height = CAPTURE_queue->display_height;
-    // |buffer_width| x |buffer_height|:
-    // The size of the buffer that the frame will be stored in.
-    // Usually the driver has limitations on alignment depending on HW.
-    const uint32_t buffer_width = gbm_bo_get_stride_for_plane(bo, 0);
-    const uint32_t buffer_height = gbm_bo_get_height(bo);
-
-    assert(display_width <= buffer_width);
-    assert(display_height <= buffer_height);
-
-    const uint32_t buffer_i420_size_in_bytes =
-        (display_width * display_height * 3) / 2;
-
-    uint8_t* buffer_i420 = malloc(sizeof(size_t) * buffer_i420_size_in_bytes);
-    assert(buffer_i420);
-    memset(buffer_i420, 0, sizeof(size_t) * buffer_i420_size_in_bytes);
-
-    nv12_to_i420(display_width, display_height, buffer_width, buffer_height,
-                 buffer_nv12, buffer_i420);
-
-    // Write I420 data to yuv file for each frame.
-    fwrite(buffer_i420, buffer_i420_size_in_bytes, 1, fp);
-
-    LOG_INFO("show_frame in CAPTURE_queue = %d\n", show_frame);
-
-    // md5sum value is computed only for displayed frames.
-    if (show_frame) {
-      LOG_INFO("frame # %d - ", frame_index);
-      compute_md5sum(buffer_i420, buffer_i420_size_in_bytes);
-    }
-
-    free(buffer_i420);
+    fwrite(buffer_nv12, buffer_size, 1, fp);
 
     munmap(buffer_nv12, buffer_size);
   } else {
@@ -691,29 +698,13 @@ int decode(struct compressed_file* file,
            struct queue* CAPTURE_queue,
            struct queue* OUTPUT_queue,
            uint64_t modifier,
-           bool write_out_individual_frames,
-           bool write_out_file,
-           char* file_name,
-           uint32_t frames_to_decode) {
+           bool write_out,
+           FILE* output_file,
+           uint32_t frames_to_decode,
+           bool print_md5hash) {
   int ret = 0;
 
   if (!ret) {
-    FILE* fp_frame;
-    FILE* fp_file;
-    char filename_frame[256];
-
-    if (write_out_file) {
-      // replace .ivf with .yuv
-      strcpy(strrchr(file_name, '.'), ".yuv");
-
-      fp_file = fopen(file_name, "wb");
-
-      if (!fp_file) {
-        LOG_ERROR("Unable to open output yuv file: %s\n", file_name);
-        return 1;
-      }
-    }
-
     while (CAPTURE_queue->processed_frames < OUTPUT_queue->processed_frames) {
       {
         uint32_t index = 0;
@@ -726,24 +717,8 @@ int decode(struct compressed_file* file,
           continue;
         }
 
-        if (write_out_individual_frames) {
-          sprintf(filename_frame, "image_%dx%d_%d.yuv",
-                  CAPTURE_queue->display_width, CAPTURE_queue->display_height,
-                  CAPTURE_queue->processed_frames);
-          fp_frame = fopen(filename_frame, "wb");
-
-          if (!fp_frame) {
-            LOG_ERROR("Unable to open frame yuv file: %s\n", filename_frame);
-            ret = 1;
-            break;
-          } else {
-            write_file_to_disk(fp_frame, CAPTURE_queue, index,
-                               CAPTURE_queue->processed_frames, show_frame);
-          }
-        }
-
-        if (write_out_file) {
-          write_file_to_disk(fp_file, CAPTURE_queue, index,
+        if (write_out) {
+          write_file_to_disk(output_file, CAPTURE_queue, index,
                              CAPTURE_queue->processed_frames, show_frame);
         }
 
@@ -751,6 +726,16 @@ int decode(struct compressed_file* file,
           CAPTURE_queue->displayed_frames++;
 
         CAPTURE_queue->processed_frames++;
+
+        if (print_md5hash && show_frame) {
+          LOG_INFO("frame # %d - ", CAPTURE_queue->displayed_frames);
+
+          struct md5_hash hash = compute_md5hash(CAPTURE_queue, index);
+
+          for (int n = 0; n < 16; ++n)
+            printf("%02x", hash.bytes[n]);
+          printf("\n");
+        }
 
         // Done with buffer, queue it back up.
         ret = queue_buffer_CAPTURE(CAPTURE_queue, index);
@@ -771,13 +756,7 @@ int decode(struct compressed_file* file,
 
         submit_compressed_frame(file, OUTPUT_queue, index, frames_to_decode);
       }
-
-      if (write_out_individual_frames)
-        fclose(fp_frame);
     }
-
-    if (write_out_file)
-      fclose(fp_file);
 
     LOG_INFO("%d frames decoded, %d displayable, %d non-visible.\n",
              CAPTURE_queue->processed_frames, CAPTURE_queue->displayed_frames,
@@ -790,15 +769,14 @@ int decode(struct compressed_file* file,
 static void print_help(const char* argv0) {
   printf("usage: %s [OPTIONS]\n", argv0);
   printf("  -f, --file        ivf file to decode\n");
-  printf(
-      "  -w, --write       write out decompressed frames to individual "
-      "files\n");
-  printf(
-      "  -y, --output_yuv  write out decompressed frames to a single file\n");
+  printf("  -w, --write       write out decompressed frames to a file\n");
   printf("  -m, --max         max number of visible frames to decode\n");
   printf("  -b, --buffer      use mmap instead of dmabuf\n");
   printf("  -o, --output_fmt  fourcc of output format\n");
   printf("  -l, --log_level   specifies log level, 0:info 1:error 2:fatal \n");
+  printf(
+      "  -d, --md5         compute md5 hash for each decoded visible frame "
+      "in I420 format\n");
 }
 
 static const struct option longopts[] = {
@@ -809,20 +787,21 @@ static const struct option longopts[] = {
     {"buffer", no_argument, NULL, 'b'},
     {"output_fmt", no_argument, NULL, 'o'},
     {"log_level", required_argument, NULL, 'l'},
+    {"md5", no_argument, NULL, 'd'},
     {0, 0, 0, 0},
 };
 
 int main(int argc, char* argv[]) {
   int c;
   char* file_name = NULL;
-  bool write_out_individual_frames = false;
-  bool write_out_file = false;
+  bool write_out = false;
+  bool print_md5hash = false;
   uint32_t frames_to_decode = UINT_MAX;
   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
   uint32_t uncompressed_fourcc = v4l2_fourcc('N', 'V', '1', '2');
   uint32_t CAPTURE_memory = V4L2_MEMORY_DMABUF;
 
-  while ((c = getopt_long(argc, argv, "wybm:f:o:l:", longopts, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "wybdm:f:o:l:", longopts, NULL)) != -1) {
     switch (c) {
       case 'f':
         file_name = strdup(optarg);
@@ -831,10 +810,7 @@ int main(int argc, char* argv[]) {
         frames_to_decode = atoi(optarg);
         break;
       case 'w':
-        write_out_individual_frames = true;
-        break;
-      case 'y':
-        write_out_file = true;
+        write_out = true;
         break;
       case 'b':
         CAPTURE_memory = V4L2_MEMORY_MMAP;
@@ -858,6 +834,9 @@ int main(int argc, char* argv[]) {
         }
         break;
       }
+      case 'd':
+        print_md5hash = true;
+        break;
       default:
         break;
     }
@@ -895,6 +874,20 @@ int main(int argc, char* argv[]) {
   if (!compressed_file.fp)
     LOG_FATAL("Unable to open ivf file: %s\n", file_name);
 
+  FILE* output_file;
+
+  if (write_out) {
+    // Replaces |.ivf| with |.yuv| in |file_name|.
+    strcpy(strrchr(file_name, '.'), ".yuv");
+
+    output_file = fopen(file_name, "wb");
+
+    if (!output_file) {
+      LOG_ERROR("Unable to open output yuv file: %s\n", file_name);
+      return 1;
+    }
+  }
+
   int v4lfd = open(kDecodeDevice, O_RDWR | O_NONBLOCK | O_CLOEXEC);
   if (v4lfd < 0)
     LOG_FATAL("Unable to open device file: %s\n", kDecodeDevice);
@@ -929,8 +922,10 @@ int main(int argc, char* argv[]) {
 
   if (!ret)
     ret = decode(&compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
-                 write_out_individual_frames, write_out_file, file_name,
-                 frames_to_decode);
+                 write_out, output_file, frames_to_decode, print_md5hash);
+
+  if (write_out)
+    fclose(output_file);
 
   cleanup_queue(&OUTPUT_queue);
   cleanup_queue(&CAPTURE_queue);
