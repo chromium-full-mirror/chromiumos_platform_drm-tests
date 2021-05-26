@@ -35,8 +35,10 @@ enum logging_levels {
 
 #define LOG(level, stream, fmt, ...)       \
   do {                                     \
-    if (level >= log_run_level)            \
+    if (level >= log_run_level) {          \
       fprintf(stream, fmt, ##__VA_ARGS__); \
+      fprintf(stream, "\n");               \
+    }                                      \
   } while (0)
 
 #define LOG_INFO(fmt, ...) LOG(kLoggingInfo, stdout, fmt, ##__VA_ARGS__)
@@ -121,12 +123,12 @@ struct compressed_file open_file(const char* file_name) {
   if (fp) {
     if (fread(&file.header, sizeof(struct ivf_file_header), 1, fp) != 1) {
       fclose(fp);
-      LOG_ERROR("unable to read ivf file header\n");
+      LOG_ERROR("Unable to read ivf file header.");
     }
 
     if (file.header.signature != kIVFHeaderSignature) {
       fclose(fp);
-      LOG_ERROR("Incorrect header signature : 0x%0x != 0x%0x\n",
+      LOG_ERROR("Incorrect header signature : 0x%0x != 0x%0x",
                 file.header.signature, kIVFHeaderSignature);
     }
 
@@ -134,18 +136,17 @@ struct compressed_file open_file(const char* file_name) {
 
     char fourcc[FOURCC_SIZE + 1];
     fourcc_to_string(file.header.fourcc, fourcc);
-    LOG_INFO("OUTPUT format: %s\n", fourcc);
+    LOG_INFO("OUTPUT format: %s", fourcc);
 
-    LOG_INFO("ivf file header: %d x %d\n", file.header.width,
-             file.header.height);
+    LOG_INFO("Ivf file header: %d x %d", file.header.width, file.header.height);
     // |width| and |height| should be even numbers.
     // This is because nv12 to i420 conversion (needed for md5hash computation)
     // assumes |width| and |height| to be even numbers.
     assert((file.header.width % 2) == 0);
     assert((file.header.height % 2) == 0);
-    LOG_INFO("ivf file header: frame_cnt = %d\n", file.header.frame_cnt);
+    LOG_INFO("Ivf file header: frame_cnt = %d", file.header.frame_cnt);
   } else {
-    LOG_ERROR("unable to open file: %s\n", file_name);
+    LOG_ERROR("Unable to open file: %s.", file_name);
   }
 
   return file;
@@ -160,7 +161,7 @@ int query_format(int v4lfd, enum v4l2_buf_type type, uint32_t fourcc) {
     if (fourcc == 0) {
       char fourcc_str[FOURCC_SIZE + 1];
       fourcc_to_string(fmtdesc.pixelformat, fourcc_str);
-      LOG_INFO("%s\n", fourcc_str);
+      LOG_INFO("%s", fourcc_str);
     } else if (fourcc == fmtdesc.pixelformat)
       return 1;
     fmtdesc.index++;
@@ -176,21 +177,21 @@ int capabilities(int v4lfd,
   memset(&cap, 0, sizeof(cap));
   int ret = ioctl(v4lfd, VIDIOC_QUERYCAP, &cap);
   if (ret != 0)
-    LOG_ERROR("VIDIOC_QUERYCAP failed: %s", strerror(errno));
+    LOG_ERROR("VIDIOC_QUERYCAP failed: %s.", strerror(errno));
 
-  LOG_INFO("driver=\"%s\" bus_info=\"%s\" card=\"%s\" fd=0x%x\n", cap.driver,
+  LOG_INFO("Driver=\"%s\" bus_info=\"%s\" card=\"%s\" fd=0x%x", cap.driver,
            cap.bus_info, cap.card, v4lfd);
 
   if (!query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
                     compressed_format)) {
-    LOG_ERROR("Supported compressed formats:\n");
+    LOG_ERROR("Supported compressed formats:");
     query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 0);
     ret = 1;
   }
 
   if (!query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                     uncompressed_format)) {
-    LOG_ERROR("Supported uncompressed formats:\n");
+    LOG_ERROR("Supported uncompressed formats:");
     query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, 0);
     ret = 1;
   }
@@ -220,7 +221,7 @@ int request_mmap_buffers(struct queue* queue,
     buffer.m.planes = planes;
     ret = ioctl(v4lfd, VIDIOC_QUERYBUF, &buffer);
     if (ret != 0) {
-      LOG_ERROR("VIDIOC_QUERYBUF failed: %d", ret);
+      LOG_ERROR("VIDIOC_QUERYBUF failed: %d.", ret);
       break;
     }
 
@@ -230,7 +231,7 @@ int request_mmap_buffers(struct queue* queue,
           mmap(NULL, buffer.m.planes[j].length, PROT_READ | PROT_WRITE,
                MAP_SHARED, v4lfd, buffer.m.planes[j].m.mem_offset);
       if (MAP_FAILED == buffers[i].start[j]) {
-        LOG_ERROR("failed to mmap buffer of length(%d) and offset(0x%x)\n",
+        LOG_ERROR("Failed to mmap buffer of length(%d) and offset(0x%x).",
                   buffer.m.planes[j].length, buffer.m.planes[j].m.mem_offset);
       }
     }
@@ -333,12 +334,12 @@ struct md5_hash compute_md5hash(struct queue* CAPTURE_queue,
   return hash;
 }
 
-// this is the input queue that will take compressed data
+// This is the input queue that will take compressed data.
 // 4.5.1.5
 int setup_OUTPUT(struct queue* OUTPUT_queue) {
   int ret = 0;
 
-  // 1. Set the coded format on OUTPUT via VIDIOC_S_FMT()
+  // 1. Sets the coded format on OUTPUT via VIDIOC_S_FMT().
   if (!ret) {
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));
@@ -350,10 +351,10 @@ int setup_OUTPUT(struct queue* OUTPUT_queue) {
 
     int ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_FMT, &fmt);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_S_FMT failed: %s", strerror(errno));
+      LOG_ERROR("VIDIOC_S_FMT failed: %s.", strerror(errno));
   }
 
-  // 2. Allocate source (bytestream) buffers via VIDIOC_REQBUFS() on OUTPUT.
+  // 2. Allocates source (bytestream) buffers via VIDIOC_REQBUFS() on OUTPUT.
   if (!ret) {
     struct v4l2_requestbuffers reqbuf;
     memset(&reqbuf, 0, sizeof(reqbuf));
@@ -363,19 +364,19 @@ int setup_OUTPUT(struct queue* OUTPUT_queue) {
 
     ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_REQBUFS, &reqbuf);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_REQBUFS failed: %s", strerror(errno));
+      LOG_ERROR("VIDIOC_REQBUFS failed: %s.", strerror(errno));
 
-    LOG_INFO("%d buffers requested, %d buffers for compressed data returned\n",
+    LOG_INFO("%d buffers requested, %d buffers for compressed data returned.",
              kRequestBufferCount, reqbuf.count);
 
     ret = request_mmap_buffers(OUTPUT_queue, &reqbuf);
   }
 
-  // 3. Start streaming on the OUTPUT queue via VIDIOC_STREAMON().
+  // 3. Starts streaming on the OUTPUT queue via VIDIOC_STREAMON().
   if (!ret) {
     ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_STREAMON, &OUTPUT_queue->type);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_STREAMON failed: %s", strerror(errno));
+      LOG_ERROR("VIDIOC_STREAMON failed: %s.", strerror(errno));
   }
 
   return ret;
@@ -391,7 +392,7 @@ int submit_compressed_frame(struct compressed_file* file,
   if (OUTPUT_queue->displayed_frames >= frames_to_decode) {
     LOG_INFO(
         "Already prepared requested number of frames |frames_to_decode|"
-        "from OUTPUT_queue.\n");
+        "from OUTPUT_queue.");
 
     return 0;
   }
@@ -399,12 +400,10 @@ int submit_compressed_frame(struct compressed_file* file,
   struct ivf_frame_header frame_header = {0};
 
   if (fread(&frame_header, sizeof(struct ivf_frame_header), 1, file->fp) != 1) {
-    if (!feof(file->fp)) {
-      LOG_ERROR("unable to read ivf frame header\n");
-    } else {
-      LOG_INFO(
-          "unable to read ivf frame header, reached the end of ivf file\n");
-    }
+    if (!feof(file->fp))
+      LOG_ERROR("Unable to read ivf frame header.");
+    else
+      LOG_INFO("Unable to read ivf frame header, reached the end of ivf file.");
 
     return -1;
   }
@@ -412,7 +411,7 @@ int submit_compressed_frame(struct compressed_file* file,
   struct mmap_buffers* buffers = OUTPUT_queue->buffers;
   if (fread(buffers[queue_index].start[0], sizeof(uint8_t), frame_header.size,
             file->fp) != frame_header.size) {
-    LOG_ERROR("unable to read ivf frame data\n");
+    LOG_ERROR("Unable to read ivf frame data.");
     return -1;
   }
 
@@ -450,7 +449,7 @@ int submit_compressed_frame(struct compressed_file* file,
   v4l2_buffer.m.planes[0].data_offset = 0;
   int ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
   if (ret != 0) {
-    LOG_ERROR("VIDIOC_QBUF failed: %s", strerror(errno));
+    LOG_ERROR("VIDIOC_QBUF failed: %s.", strerror(errno));
     return -1;
   }
 
@@ -517,21 +516,20 @@ int queue_buffer_CAPTURE(struct queue* queue, uint32_t index) {
   }
 
   int ret = ioctl(queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
-  if (ret != 0) {
-    LOG_ERROR("VIDIOC_QBUF failed: %s", strerror(errno));
-  }
+  if (ret != 0)
+    LOG_ERROR("VIDIOC_QBUF failed: %s.", strerror(errno));
 
   return ret;
 }
 
-// this is the output queue that will produce uncompressed frames
+// This is the output queue that will produce uncompressed frames.
 // 4.5.1.6
 int setup_CAPTURE(struct gbm_device* gbm,
                   struct queue* CAPTURE_queue,
                   uint64_t modifier) {
   int ret = 0;
 
-  // 1. Call VIDIOC_G_FMT() on the CAPTURE queue to get format for the
+  // 1. Calls VIDIOC_G_FMT() on the CAPTURE queue to get format for the
   //    destination buffers parsed/decoded from the bytestream.
   if (!ret) {
     struct v4l2_format fmt;
@@ -540,17 +538,17 @@ int setup_CAPTURE(struct gbm_device* gbm,
 
     int ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_G_FMT, &fmt);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_G_FMT failed: %s", strerror(errno));
+      LOG_ERROR("VIDIOC_G_FMT failed: %s.", strerror(errno));
 
     CAPTURE_queue->coded_width = fmt.fmt.pix_mp.width;
     CAPTURE_queue->coded_height = fmt.fmt.pix_mp.height;
     CAPTURE_queue->num_planes = fmt.fmt.pix_mp.num_planes;
 
-    LOG_INFO("CAPTURE: %d x %d\n", fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height);
-    LOG_INFO("num_planes = %d\n", fmt.fmt.pix_mp.num_planes);
+    LOG_INFO("CAPTURE: %d x %d", fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height);
+    LOG_INFO("num_planes = %d", fmt.fmt.pix_mp.num_planes);
   }
 
-  // 4. Optional. Set the CAPTURE format via VIDIOC_S_FMT() on the CAPTURE
+  // 4. Optional. Sets the CAPTURE format via VIDIOC_S_FMT() on the CAPTURE
   // queue.
   //    The client may choose a different format than selected/suggested by the
   //    decoder in VIDIOC_G_FMT().
@@ -565,10 +563,10 @@ int setup_CAPTURE(struct gbm_device* gbm,
 
     ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_FMT, &fmt);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_S_FMT failed: %s", strerror(errno));
+      LOG_ERROR("VIDIOC_S_FMT failed: %s.", strerror(errno));
   }
 
-  // 10. Allocate CAPTURE buffers via VIDIOC_REQBUFS() on the CAPTURE queue.
+  // 10. Allocates CAPTURE buffers via VIDIOC_REQBUFS() on the CAPTURE queue.
   if (!ret) {
     struct v4l2_requestbuffers reqbuf;
     memset(&reqbuf, 0, sizeof(reqbuf));
@@ -578,9 +576,9 @@ int setup_CAPTURE(struct gbm_device* gbm,
 
     ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_REQBUFS, &reqbuf);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_REQBUFS failed: %s", strerror(errno));
+      LOG_ERROR("VIDIOC_REQBUFS failed: %s.", strerror(errno));
 
-    LOG_INFO("%d buffers requested, %d buffers for decoded data returned\n",
+    LOG_INFO("%d buffers requested, %d buffers for decoded data returned.",
              kRequestBufferCount, reqbuf.count);
 
     if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
@@ -604,7 +602,7 @@ int setup_CAPTURE(struct gbm_device* gbm,
           if (ret != 0)
             break;
         } else {
-          LOG_ERROR("could not allocate a bo %d x %d\n", width, height);
+          LOG_ERROR("Could not allocate a bo %d x %d.", width, height);
           ret = -1;
           break;
         }
@@ -619,11 +617,11 @@ int setup_CAPTURE(struct gbm_device* gbm,
     }
   }
 
-  // 11. Call VIDIOC_STREAMON() on the CAPTURE queue to start decoding frames.
+  // 11. Calls VIDIOC_STREAMON() on the CAPTURE queue to start decoding frames.
   if (!ret) {
     ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_STREAMON, &CAPTURE_queue->type);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_STREAMON failed: %s", strerror(errno));
+      LOG_ERROR("VIDIOC_STREAMON failed: %s.", strerror(errno));
   }
 
   return ret;
@@ -721,13 +719,13 @@ int drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
   {
     uint32_t bytesused = 0;
     uint32_t flags = 0;
-    const int kMaxDrainDelay = 2048;
+    const int max_drain_delay = 2048;
     // Checks to make sure the queue is empty.
     // It takes time to execute V4L2_DEC_CMD_STOP cmd.
     // From experiments, iterating |kMaxDrainDelay| times
     // was good enough to get V4L2_BUF_FLAG_LAST flag.
     int counter;
-    for (counter = kMaxDrainDelay; counter > 0; ++counter) {
+    for (counter = max_drain_delay; counter > 0; ++counter) {
       ret = dequeue_buffer(CAPTURE_queue, NULL, &bytesused, &flags, NULL);
 
       if (ret == 0) {
@@ -742,12 +740,12 @@ int drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
       LOG_ERROR(
           "V4L2_DEC_CMD_STOP cmd execution was not completed within %d "
           "iterations.\n",
-          kMaxDrainDelay);
+          max_drain_delay);
       ret = 1;
     }
 
     const bool is_v4l2_buf_last_flag_set = flags & V4L2_BUF_FLAG_LAST;
-    LOG_INFO("V4L2_BUF_FLAG_LAST = %d \n", is_v4l2_buf_last_flag_set);
+    LOG_INFO("V4L2_BUF_FLAG_LAST = %d", is_v4l2_buf_last_flag_set);
 
     if (!is_v4l2_buf_last_flag_set && (bytesused != 0)) {
       LOG_ERROR("WARNING: CAPTURE queue did not clean up.\n");
@@ -790,7 +788,8 @@ int decode(struct compressed_file* file,
         ret = dequeue_buffer(CAPTURE_queue, &index, NULL, NULL, &show_frame);
         if (ret != 0) {
           if (errno != EAGAIN)
-            LOG_ERROR("VIDIOC_DQBUF failed: %s", strerror(errno));
+            LOG_ERROR("VIDIOC_DQBUF failed for CAPTURE queue: %s.",
+                      strerror(errno));
           continue;
         }
 
@@ -825,7 +824,8 @@ int decode(struct compressed_file* file,
         ret = dequeue_buffer(OUTPUT_queue, &index, NULL, NULL, NULL);
         if (ret != 0) {
           if (errno != EAGAIN)
-            LOG_ERROR("VIDIOC_DQBUF failed: %s", strerror(errno));
+            LOG_ERROR("VIDIOC_DQBUF failed for OUTPUT queue: %s.",
+                      strerror(errno));
           continue;
         }
 
@@ -835,7 +835,7 @@ int decode(struct compressed_file* file,
 
     drain(OUTPUT_queue, CAPTURE_queue);
 
-    LOG_INFO("%d frames decoded, %d displayable, %d non-visible.\n",
+    LOG_INFO("%d frames decoded, %d displayable, %d non-visible.",
              CAPTURE_queue->processed_frames, CAPTURE_queue->displayed_frames,
              CAPTURE_queue->processed_frames - CAPTURE_queue->displayed_frames);
   }
@@ -904,7 +904,7 @@ int main(int argc, char* argv[]) {
       case 'l': {
         const uint32_t specified_log_run_level = atoi(optarg);
         if (specified_log_run_level >= kLoggingLevelMax) {
-          LOG_INFO("undefined log level %d, using default log level instead.\n",
+          LOG_INFO("Undefined log level %d, using default log level instead.",
                    specified_log_run_level);
         } else {
           log_run_level = specified_log_run_level;
@@ -919,17 +919,17 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  LOG_INFO("simple v4l2 decode\n");
+  LOG_INFO("Simple v4l2 decode.");
 
   if (frames_to_decode != UINT_MAX)
-    LOG_INFO("only decoding a max of %d frames.\n", frames_to_decode);
+    LOG_INFO("Only decoding a max of %d frames.", frames_to_decode);
 
   char fourcc[FOURCC_SIZE + 1];
   fourcc_to_string(uncompressed_fourcc, fourcc);
-  LOG_INFO("CAPTURE format: %s\n", fourcc);
+  LOG_INFO("CAPTURE format: %s", fourcc);
 
   if (uncompressed_fourcc == v4l2_fourcc('Q', '1', '2', '8'))
-    LOG_INFO("compressed format, setting modifier\n");
+    LOG_INFO("Compressed format, setting modifier.");
 
   if (!file_name) {
     print_help(argv[0]);
@@ -938,18 +938,18 @@ int main(int argc, char* argv[]) {
 
   int drm_device_fd = bs_drm_open_main_display();
   if (drm_device_fd < 0) {
-    LOG_FATAL("failed to open card for display\n");
+    LOG_FATAL("Failed to open card for display.");
   }
 
   struct gbm_device* gbm = gbm_create_device(drm_device_fd);
   if (!gbm) {
     close(drm_device_fd);
-    LOG_FATAL("failed to create gbm device\n");
+    LOG_FATAL("Failed to create gbm device.");
   }
 
   struct compressed_file compressed_file = open_file(file_name);
   if (!compressed_file.fp)
-    LOG_FATAL("Unable to open ivf file: %s\n", file_name);
+    LOG_FATAL("Unable to open ivf file: %s.", file_name);
 
   FILE* output_file = NULL;
 
@@ -960,18 +960,18 @@ int main(int argc, char* argv[]) {
     output_file = fopen(file_name, "wb");
 
     if (!output_file) {
-      LOG_ERROR("Unable to open output yuv file: %s\n", file_name);
+      LOG_ERROR("Unable to open output yuv file: %s.", file_name);
       return 1;
     }
   }
 
   int v4lfd = open(kDecodeDevice, O_RDWR | O_NONBLOCK | O_CLOEXEC);
   if (v4lfd < 0)
-    LOG_FATAL("Unable to open device file: %s\n", kDecodeDevice);
+    LOG_FATAL("Unable to open device file: %s.", kDecodeDevice);
 
   if (capabilities(v4lfd, compressed_file.header.fourcc, uncompressed_fourcc) !=
       0)
-    LOG_FATAL("Capabilities not present for decode.\n");
+    LOG_FATAL("Capabilities not present for decode.");
 
   struct queue OUTPUT_queue = {.v4lfd = v4lfd,
                                .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
