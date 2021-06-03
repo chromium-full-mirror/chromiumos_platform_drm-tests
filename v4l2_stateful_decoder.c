@@ -506,6 +506,7 @@ int queue_buffer_CAPTURE(struct queue* queue, uint32_t index) {
   for (uint32_t i = 0; i < queue->num_planes; ++i) {
     if (queue->memory == V4L2_MEMORY_DMABUF) {
       v4l2_buffer.m.planes[i].m.fd = gbm_bo_get_fd_for_plane(bo, i);
+      assert(v4l2_buffer.m.planes[i].m.fd);
     } else if (queue->memory == V4L2_MEMORY_MMAP) {
       struct mmap_buffers* buffers = queue->buffers;
 
@@ -518,6 +519,16 @@ int queue_buffer_CAPTURE(struct queue* queue, uint32_t index) {
   int ret = ioctl(queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
   if (ret != 0)
     LOG_ERROR("VIDIOC_QBUF failed: %s.", strerror(errno));
+
+  if (queue->memory == V4L2_MEMORY_DMABUF) {
+    for (uint32_t i = 0; i < queue->num_planes; ++i) {
+      ret = close(v4l2_buffer.m.planes[i].m.fd);
+      if (ret != 0) {
+        LOG_ERROR("close failed with v4l2_buffer.m.planes[%d].m.fd: %s.", i,
+                  strerror(errno));
+      }
+    }
+  }
 
   return ret;
 }
@@ -635,6 +646,7 @@ void write_file_to_disk(FILE* fp,
   if (V4L2_MEMORY_DMABUF == CAPTURE_queue->memory) {
     struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
     int bo_fd = gbm_bo_get_fd(bo);
+    assert(bo_fd);
     size_t buffer_size = lseek(bo_fd, 0, SEEK_END);
     lseek(bo_fd, 0, SEEK_SET);
 
@@ -647,6 +659,8 @@ void write_file_to_disk(FILE* fp,
     fwrite(buffer_nv12, buffer_size, 1, fp);
 
     munmap(buffer_nv12, buffer_size);
+
+    close(bo_fd);
   } else {
     if (CAPTURE_queue->num_planes == 1) {
       size_t buffer_size =
