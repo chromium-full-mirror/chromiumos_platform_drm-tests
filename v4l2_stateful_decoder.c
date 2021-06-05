@@ -647,11 +647,14 @@ void write_file_to_disk(FILE* fp,
     struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
     int bo_fd = gbm_bo_get_fd(bo);
     assert(bo_fd);
-    size_t buffer_size = lseek(bo_fd, 0, SEEK_END);
-    lseek(bo_fd, 0, SEEK_SET);
 
     assert(gbm_bo_get_stride_for_plane(bo, 0) ==
            gbm_bo_get_stride_for_plane(bo, 1));
+
+    const uint32_t buffer_width = gbm_bo_get_stride_for_plane(bo, 0);
+    const uint32_t buffer_height = gbm_bo_get_height(bo);
+
+    const uint32_t buffer_size = (buffer_width * buffer_height * 3) / 2;
 
     uint8_t* buffer_nv12 =
         mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
@@ -807,13 +810,13 @@ int decode(struct compressed_file* file,
           continue;
         }
 
-        if (output_file) {
-          write_file_to_disk(output_file, CAPTURE_queue, index,
-                             CAPTURE_queue->processed_frames, show_frame);
-        }
-
-        if (show_frame)
+        if (show_frame) {
           CAPTURE_queue->displayed_frames++;
+          if (output_file) {
+            write_file_to_disk(output_file, CAPTURE_queue, index,
+                               CAPTURE_queue->processed_frames, show_frame);
+          }
+        }
 
         CAPTURE_queue->processed_frames++;
 
@@ -1012,12 +1015,9 @@ int main(int argc, char* argv[]) {
     ret = setup_CAPTURE(gbm, &CAPTURE_queue, modifier);
 
   if (!ret) {
-    ret = decode(&compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
-                 output_file, frames_to_decode, print_md5hash);
+    decode(&compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
+           output_file, frames_to_decode, print_md5hash);
   }
-
-  if (ret)
-    LOG_ERROR("|decode| function has returned value %d.\n", ret);
 
   if (write_out)
     fclose(output_file);
