@@ -53,13 +53,16 @@ void NV12Rotate90(const uint8_t* src_y, int src_stride_y,
       *(dst_y + col * dst_stride_y + row) = *src_sample;
     }
   }
-  // Same idea but note the halving of |src_height| for the UV planes.
+  // Same idea but note the halving of |src_height| and |src_width| for the UV
+  // planes, and treat |src_uv| and |dst_uv| as uint16_t arrays to account for
+  // the UV pairs.
   const int uv_src_height = (src_height + 1) / 2;
-  const int uv_src_width = 2 * ((src_width + 1) / 2);
+  const int uv_src_width = (src_width + 1) / 2;
   for (int row = 0; row < uv_src_height; ++row) {
     for (int col = 0; col < uv_src_width; ++col) {
-      const uint8_t* src_sample = src_uv + row * src_stride_uv + col;
-      *(dst_uv + col * dst_stride_uv + row) = *src_sample;
+      const uint16_t* src_sample =
+          (const uint16_t*)src_uv + row * (src_stride_uv / 2) + col;
+      *((uint16_t*)dst_uv + col * (dst_stride_uv / 2) + row) = *src_sample;
     }
   }
 }
