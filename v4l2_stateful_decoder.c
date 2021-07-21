@@ -82,6 +82,10 @@ struct queue {
   uint32_t memory;
   uint32_t processed_frames;
   uint32_t displayed_frames;
+  // Set to true when a frame is recieved with V4L2_BUF_FLAG_LAST set. This
+  // happens when a decoder returns the last frame from its stream. Any
+  // subsequent attempts to dequeue will fail with EPIPE.
+  bool buf_last_flag_has_been_set;
 };
 
 struct ivf_file_header {
@@ -110,6 +114,14 @@ struct compressed_file {
 struct md5_hash {
   uint8_t bytes[16];
 };
+
+bool is_vp9(uint32_t fourcc) {
+  // VP9 FourCC should match VP9X where 'X' is the version number. This check
+  // ignores the last character, so VP90, VP91, etc. match.
+  return (fourcc & 0xff) == 'V' &&
+    (fourcc >> 8 & 0xff) == 'P' &&
+    (fourcc >> 16 & 0xff) == '9';
+}
 
 void fourcc_to_string(uint32_t fourcc, char* fourcc_string) {
   sprintf(fourcc_string, "%c%c%c%c", fourcc & 0xff, fourcc >> 8 & 0xff,
@@ -233,6 +245,7 @@ int request_mmap_buffers(struct queue* queue,
       if (MAP_FAILED == buffers[i].start[j]) {
         LOG_ERROR("Failed to mmap buffer of length(%d) and offset(0x%x).",
                   buffer.m.planes[j].length, buffer.m.planes[j].m.mem_offset);
+        ret = -1;
       }
     }
   }
@@ -400,12 +413,13 @@ int submit_compressed_frame(struct compressed_file* file,
   struct ivf_frame_header frame_header = {0};
 
   if (fread(&frame_header, sizeof(struct ivf_frame_header), 1, file->fp) != 1) {
-    if (!feof(file->fp))
+    if (!feof(file->fp)) {
       LOG_ERROR("Unable to read ivf frame header.");
-    else
+      return -1;
+    } else {
       LOG_INFO("Unable to read ivf frame header, reached the end of ivf file.");
-
-    return -1;
+      return 0;
+    }
   }
 
   struct mmap_buffers* buffers = OUTPUT_queue->buffers;
@@ -415,21 +429,24 @@ int submit_compressed_frame(struct compressed_file* file,
     return -1;
   }
 
-  // VP9 Bitstream and Decoding Process Specification
-  // Sec 6.2 "Uncompressed header syntax", pp.28.
-  // https://storage.googleapis.com/downloads.webmproject.org/docs/vp9/vp9-bitstream-specification-v0.6-20160331-draft.pdf
-  //
-  // |show_frame| is the second bit (counting from the least
-  // significant one) of the VP9 frame header's first byte.
-  const bool show_frame =
-      (*(uint32_t*)buffers[queue_index].start[0] & (1 << 1));
-
-  // Assumption here is that an non-displayed frame is always followed by a
-  // displayed frame. Please reference super-frame for more details.
-  // http://downloads.webmproject.org/docs/vp9/vp9-bitstream_superframe-and-uncompressed-header_v1.0.pdf
   OUTPUT_queue->processed_frames++;
-  if (!show_frame)
-    OUTPUT_queue->processed_frames++;
+
+  if (is_vp9(file->header.fourcc)) {
+    // VP9 Bitstream and Decoding Process Specification
+    // Sec 6.2 "Uncompressed header syntax", pp.28.
+    // https://storage.googleapis.com/downloads.webmproject.org/docs/vp9/vp9-bitstream-specification-v0.6-20160331-draft.pdf
+    //
+    // |show_frame| is the second bit (counting from the least
+    // significant one) of the VP9 frame header's first byte.
+    const bool show_frame =
+        (*(uint32_t*)buffers[queue_index].start[0] & (1 << 1));
+
+    // Assumption here is that an non-displayed frame is always followed by a
+    // displayed frame. Please reference super-frame for more details.
+    // http://downloads.webmproject.org/docs/vp9/vp9-bitstream_superframe-and-uncompressed-header_v1.0.pdf
+    if (!show_frame)
+      OUTPUT_queue->processed_frames++;
+  }
 
   struct v4l2_buffer v4l2_buffer;
   struct v4l2_plane planes[VIDEO_MAX_PLANES];
@@ -477,13 +494,14 @@ void cleanup_queue(struct queue* queue) {
   if (queue->cnt) {
     struct mmap_buffers* buffers = queue->buffers;
 
-    for (uint32_t i = 0; i < queue->cnt; ++i)
+    for (uint32_t i = 0; i < queue->cnt; ++i) {
       for (uint32_t j = 0; j < queue->num_planes; ++j) {
         if (buffers[i].length[j])
           munmap(buffers[i].start[j], buffers[i].length[j]);
-        if (buffers[i].bo)
-          gbm_bo_destroy(buffers[i].bo);
       }
+      if (buffers[i].bo)
+        gbm_bo_destroy(buffers[i].bo);
+    }
 
     free(queue->buffers);
     queue->cnt = 0;
@@ -522,10 +540,11 @@ int queue_buffer_CAPTURE(struct queue* queue, uint32_t index) {
 
   if (queue->memory == V4L2_MEMORY_DMABUF) {
     for (uint32_t i = 0; i < queue->num_planes; ++i) {
-      ret = close(v4l2_buffer.m.planes[i].m.fd);
-      if (ret != 0) {
+      int ret_close = close(v4l2_buffer.m.planes[i].m.fd);
+      if (ret_close != 0) {
         LOG_ERROR("close failed with v4l2_buffer.m.planes[%d].m.fd: %s.", i,
                   strerror(errno));
+        ret = ret_close;
       }
     }
   }
@@ -620,8 +639,12 @@ int setup_CAPTURE(struct gbm_device* gbm,
       }
     } else if (CAPTURE_queue->memory == V4L2_MEMORY_MMAP) {
       ret = request_mmap_buffers(CAPTURE_queue, &reqbuf);
-      for (uint32_t i = 0; i < reqbuf.count; ++i) {
-        queue_buffer_CAPTURE(CAPTURE_queue, i);
+      if (!ret) {
+        for (uint32_t i = 0; i < reqbuf.count; ++i) {
+          ret = queue_buffer_CAPTURE(CAPTURE_queue, i);
+          if (ret != 0)
+            break;
+        }
       }
     } else {
       ret = -1;
@@ -714,6 +737,10 @@ int dequeue_buffer(struct queue* queue,
         !(v4l2_buffer.timestamp.tv_sec < kTimestampMarkerForShowFrames);
   }
 
+  if (v4l2_buffer.flags & V4L2_BUF_FLAG_LAST) {
+    queue->buf_last_flag_has_been_set = true;
+  }
+
   return ret;
 }
 
@@ -732,8 +759,9 @@ int drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
 
   // 2. Dequeue buffers
   // The way the decode loop is set up, there shouldn't be any buffers
-  // left to dequeue.
-  {
+  // left to dequeue. Furthermore, if the CAPTURE_queue has already set
+  // V4L2_BUF_FLAG_LAST, then there is no need to dequeue.
+  if (!CAPTURE_queue->buf_last_flag_has_been_set ) {
     uint32_t bytesused = 0;
     uint32_t flags = 0;
     const int max_drain_delay = 2048;
@@ -742,14 +770,16 @@ int drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
     // From experiments, iterating |kMaxDrainDelay| times
     // was good enough to get V4L2_BUF_FLAG_LAST flag.
     int counter;
-    for (counter = max_drain_delay; counter > 0; ++counter) {
+    for (counter = max_drain_delay; counter > 0; --counter) {
       ret = dequeue_buffer(CAPTURE_queue, NULL, &bytesused, &flags, NULL);
 
       if (ret == 0) {
         break;
       } else {
-        if (errno != EAGAIN)
+        if (errno != EAGAIN) {
           LOG_ERROR("VIDIOC_DQBUF failed: %s", strerror(errno));
+          break;
+        }
       }
     }
 
@@ -761,10 +791,7 @@ int drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
       ret = 1;
     }
 
-    const bool is_v4l2_buf_last_flag_set = flags & V4L2_BUF_FLAG_LAST;
-    LOG_INFO("V4L2_BUF_FLAG_LAST = %d", is_v4l2_buf_last_flag_set);
-
-    if (!is_v4l2_buf_last_flag_set && (bytesused != 0)) {
+    if (!CAPTURE_queue->buf_last_flag_has_been_set && (bytesused != 0)) {
       LOG_ERROR("WARNING: CAPTURE queue did not clean up.\n");
       ret = 1;
     }
@@ -801,12 +828,17 @@ int decode(struct compressed_file* file,
     while (CAPTURE_queue->processed_frames < OUTPUT_queue->processed_frames) {
       {
         uint32_t index = 0;
+        uint32_t flags = 0;
         bool show_frame;
-        ret = dequeue_buffer(CAPTURE_queue, &index, NULL, NULL, &show_frame);
-        if (ret != 0) {
-          if (errno != EAGAIN)
+        const int ret_dequeue = dequeue_buffer(CAPTURE_queue, &index, NULL,
+                                               &flags, &show_frame);
+        if (ret_dequeue != 0) {
+          if (errno != EAGAIN) {
             LOG_ERROR("VIDIOC_DQBUF failed for CAPTURE queue: %s.",
                       strerror(errno));
+            ret = ret_dequeue;
+            break;
+          }
           continue;
         }
 
@@ -830,6 +862,12 @@ int decode(struct compressed_file* file,
           printf("\n");
         }
 
+        // Break out of the decode loop if V4L2_BUF_FLAG_LAST is set.
+        if (CAPTURE_queue->buf_last_flag_has_been_set) {
+          LOG_INFO("CAPTURE_queue produced last buffer.");
+          break;
+        }
+
         // Done with buffer, queue it back up.
         ret = queue_buffer_CAPTURE(CAPTURE_queue, index);
       }
@@ -838,11 +876,15 @@ int decode(struct compressed_file* file,
       // now be a free OUTPUT buffer.
       {
         uint32_t index = 0;
-        ret = dequeue_buffer(OUTPUT_queue, &index, NULL, NULL, NULL);
-        if (ret != 0) {
-          if (errno != EAGAIN)
+        const int ret_dequeue = dequeue_buffer(OUTPUT_queue, &index, NULL,
+                                               NULL, NULL);
+        if (ret_dequeue != 0) {
+          if (errno != EAGAIN) {
             LOG_ERROR("VIDIOC_DQBUF failed for OUTPUT queue: %s.",
                       strerror(errno));
+            ret = ret_dequeue;
+            break;
+          }
           continue;
         }
 
@@ -876,7 +918,6 @@ static void print_help(const char* argv0) {
 static const struct option longopts[] = {
     {"file", required_argument, NULL, 'f'},
     {"write", no_argument, NULL, 'w'},
-    {"output_yuv", no_argument, NULL, 'y'},
     {"max", required_argument, NULL, 'm'},
     {"buffer", no_argument, NULL, 'b'},
     {"output_fmt", no_argument, NULL, 'o'},
@@ -895,7 +936,7 @@ int main(int argc, char* argv[]) {
   uint32_t uncompressed_fourcc = v4l2_fourcc('N', 'V', '1', '2');
   uint32_t CAPTURE_memory = V4L2_MEMORY_DMABUF;
 
-  while ((c = getopt_long(argc, argv, "wybdm:f:o:l:", longopts, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "wbdm:f:o:l:", longopts, NULL)) != -1) {
     switch (c) {
       case 'f':
         file_name = strdup(optarg);
@@ -1015,8 +1056,8 @@ int main(int argc, char* argv[]) {
     ret = setup_CAPTURE(gbm, &CAPTURE_queue, modifier);
 
   if (!ret) {
-    decode(&compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
-           output_file, frames_to_decode, print_md5hash);
+    ret = decode(&compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
+                 output_file, frames_to_decode, print_md5hash);
   }
 
   if (write_out)
@@ -1029,5 +1070,5 @@ int main(int argc, char* argv[]) {
   close(drm_device_fd);
   free(file_name);
 
-  return 0;
+  return ret;
 }
