@@ -49,6 +49,12 @@ enum logging_levels {
     exit(EXIT_FAILURE);                             \
   } while (0)
 
+// TODO(frkoenig):
+// P010 had not landed as an official V4L2 format yet. Once it has remove this.
+#ifndef V4L2_PIX_FMT_P010
+#define V4L2_PIX_FMT_P010    v4l2_fourcc('P', '0', '1', '0') /* 15  Y/CbCr 4:2:0 10-bit per pixel*/
+#endif
+
 static const char* kDecodeDevice = "/dev/video-dec0";
 static const int kInputbufferMaxSize = 4 * 1024 * 1024;
 static const int kRequestBufferCount = 8;
@@ -253,6 +259,42 @@ int request_mmap_buffers(struct queue* queue,
   return ret;
 }
 
+int request_dmabuf_buffers(struct gbm_device* gbm,
+                           struct queue* CAPTURE_queue,
+                           uint64_t modifier, const int count) {
+  int ret = 0;
+  const uint32_t buffer_alloc = count * sizeof(struct mmap_buffers);
+  struct mmap_buffers* buffers = (struct mmap_buffers*)malloc(buffer_alloc);
+  assert(buffers);
+  memset(buffers, 0, buffer_alloc);
+  CAPTURE_queue->buffers = buffers;
+  CAPTURE_queue->cnt = count;
+
+  uint32_t gbm_format;
+  if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12) {
+    gbm_format = GBM_FORMAT_NV12;
+  } else if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_P010) {
+    gbm_format = GBM_FORMAT_P010;
+  } else {
+    char fourcc_str[FOURCC_SIZE + 1];
+    fourcc_to_string(CAPTURE_queue->fourcc, fourcc_str);
+    LOG_ERROR("Support for %s as an output format is not present.", fourcc_str);
+    return -1;
+  }
+
+  for (uint32_t i = 0; i < CAPTURE_queue->cnt; ++i) {
+    const uint32_t width = CAPTURE_queue->coded_width;
+    const uint32_t height = CAPTURE_queue->coded_height;
+
+    struct gbm_bo* bo = gbm_bo_create_with_modifiers(
+        gbm, width, height, gbm_format, &modifier, /*count=*/1);
+    assert(bo);
+    CAPTURE_queue->buffers[i].bo = bo;
+  }
+
+  return ret;
+}
+
 // NV12 to I420 conversion.
 // This function converts the NV12 |buffer_in| into an I420 |buffer_out|.
 // |buffer_in| is padded, whereas |buffer_out| is tightly packed.
@@ -300,6 +342,8 @@ struct md5_hash compute_md5hash(struct queue* CAPTURE_queue,
                                 uint32_t queue_index) {
   // TODO: needs to handle V4L2_MEMORY_MMAP case
   assert(CAPTURE_queue->memory == V4L2_MEMORY_DMABUF);
+  // TODO: only handles 8 bit pixels
+  assert(CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12);
 
   struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
   int bo_fd = gbm_bo_get_fd(bo);
@@ -611,43 +655,19 @@ int setup_CAPTURE(struct gbm_device* gbm,
     LOG_INFO("%d buffers requested, %d buffers for decoded data returned.",
              kRequestBufferCount, reqbuf.count);
 
-    if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
-      const uint32_t buffer_alloc = reqbuf.count * sizeof(struct mmap_buffers);
-      struct mmap_buffers* buffers = (struct mmap_buffers*)malloc(buffer_alloc);
-      assert(buffers);
-      memset(buffers, 0, buffer_alloc);
-      CAPTURE_queue->buffers = buffers;
-      CAPTURE_queue->cnt = reqbuf.count;
-
-      for (uint32_t i = 0; i < CAPTURE_queue->cnt; ++i) {
-        const uint32_t width = CAPTURE_queue->coded_width;
-        const uint32_t height = CAPTURE_queue->coded_height;
-
-        struct gbm_bo* bo = gbm_bo_create_with_modifiers(
-            gbm, width, height, GBM_FORMAT_NV12, &modifier, 1);
-        CAPTURE_queue->buffers[i].bo = bo;
-
-        if (bo) {
-          ret = queue_buffer_CAPTURE(CAPTURE_queue, i);
-          if (ret != 0)
-            break;
-        } else {
-          LOG_ERROR("Could not allocate a bo %d x %d.", width, height);
-          ret = -1;
-          break;
-        }
-      }
-    } else if (CAPTURE_queue->memory == V4L2_MEMORY_MMAP) {
+    if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF)
+      ret = request_dmabuf_buffers(gbm, CAPTURE_queue, modifier, reqbuf.count);
+    else if (CAPTURE_queue->memory == V4L2_MEMORY_MMAP)
       ret = request_mmap_buffers(CAPTURE_queue, &reqbuf);
-      if (!ret) {
-        for (uint32_t i = 0; i < reqbuf.count; ++i) {
-          ret = queue_buffer_CAPTURE(CAPTURE_queue, i);
-          if (ret != 0)
-            break;
-        }
-      }
-    } else {
+    else
       ret = -1;
+
+    if (!ret) {
+      for (uint32_t i = 0; i < reqbuf.count; ++i) {
+        ret = queue_buffer_CAPTURE(CAPTURE_queue, i);
+        if (ret != 0)
+          break;
+      }
     }
   }
 
