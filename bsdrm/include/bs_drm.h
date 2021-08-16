@@ -36,6 +36,9 @@
 
 #define BS_ALIGN(a, alignment) ((a + (alignment - 1)) & ~(alignment - 1))
 
+#define for_each_bit32(b, u32) \
+	for (uint32_t __v = (u32), b; b = ffs(__v) - 1, __v; __v &= ~(1 << b))
+
 // debug.c
 __attribute__((format(printf, 5, 6))) void bs_debug_print(const char *prefix, const char *func,
 							  const char *file, int line,
