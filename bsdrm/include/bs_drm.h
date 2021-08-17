@@ -43,16 +43,9 @@
 __attribute__((format(printf, 5, 6))) void bs_debug_print(const char *prefix, const char *func,
 							  const char *file, int line,
 							  const char *format, ...);
-#define bs_debug_error(...)                                                         \
-	do {                                                                        \
-		bs_debug_print("ERROR", __func__, __FILE__, __LINE__, __VA_ARGS__); \
-	} while (0)
 
-#define bs_debug_warning(...)                                                      \
-	do {                                                                       \
-		bs_debug_print("WARN", __func__, __FILE__, __LINE__, __VA_ARGS__); \
-	} while (0)
-
+#define bs_debug_error(...) bs_debug_print("ERROR", __func__, __FILE__, __LINE__, __VA_ARGS__)
+#define bs_debug_warning(...) bs_debug_print("WARN", __func__, __FILE__, __LINE__, __VA_ARGS__)
 #define bs_debug_info(...) bs_debug_print("INFO", __func__, __FILE__, __LINE__, __VA_ARGS__)
 
 int64_t bs_debug_gettime_ns();
