@@ -21,7 +21,10 @@
 #include <time.h>
 #include <unistd.h>
 
-static const char* kEncodeDevice = "/dev/video-enc0";
+// TODO(mcasas): Consider trying all /dev/video-enc* device files if a platform
+// has more than two.
+static const char* kEncodeDeviceFiles[] = {"/dev/video-enc0",
+                                           "/dev/video-enc1"};
 static const int kInputbufferMaxSize = 4 * 1024 * 1024;
 static const int kRequestBufferCount = 8;
 static const uint32_t kIVFHeaderSignature = v4l2_fourcc('D', 'K', 'I', 'F');
@@ -108,7 +111,7 @@ void enumerate_menu(int v4lfd, uint32_t id, uint32_t min, uint32_t max) {
   }
 }
 
-int capabilities(int v4lfd,
+int verify_capabilities(int v4lfd,
                  uint32_t OUTPUT_format,
                  uint32_t CAPTURE_format) {
   struct v4l2_capability cap;
@@ -121,15 +124,19 @@ int capabilities(int v4lfd,
          cap.bus_info, cap.card, v4lfd);
 
   if (!query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, OUTPUT_format)) {
-    printf("Supported OUTPUT formats:\n");
+    printf("Insufficient supported OUTPUT formats:\n");
     query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 0);
+    printf("Wanted: ");
+    print_fourcc(OUTPUT_format);
     ret = 1;
   }
 
   if (!query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                     CAPTURE_format)) {
-    printf("Supported CAPTURE formats:\n");
+    printf("Insufficient supported CAPTURE formats:\n");
     query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, 0);
+    printf("Wanted: ");
+    print_fourcc(CAPTURE_format);
     ret = 1;
   }
 
@@ -1012,14 +1019,26 @@ int main(int argc, char* argv[]) {
       stderr, "encoding %d frames using %s bitrate control\n", frames_to_encode,
       (bitrate_mode == V4L2_MPEG_VIDEO_BITRATE_MODE_CBR) ? "CBR" : "VBR");
 
-  int v4lfd = open(kEncodeDevice, O_RDWR | O_NONBLOCK | O_CLOEXEC);
-  if (v4lfd < 0) {
-    fprintf(stderr, "Unable to open device file: %s\n", kEncodeDevice);
-    exit(EXIT_FAILURE);
+  int v4lfd = -1;
+  const size_t kEncodeDeviceFilesSize =
+      sizeof(kEncodeDeviceFiles) / sizeof(char*);
+  for (int index = 0; index < kEncodeDeviceFilesSize; ++index) {
+    int temp_fd =
+      open(kEncodeDeviceFiles[index], O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (temp_fd < 0)
+      continue;
+
+    if (verify_capabilities(temp_fd, OUTPUT_format, CAPTURE_format) == 0) {
+      v4lfd = temp_fd;
+      break;
+    } else {
+      close(temp_fd);
+    }
   }
 
-  if (capabilities(v4lfd, OUTPUT_format, CAPTURE_format) != 0) {
-    fprintf(stderr, "Capabilities not present for encode.\n");
+  if (v4lfd < 0) {
+    fprintf(stderr,
+        "Did not find a device file with the needed capabilities\n");
     exit(EXIT_FAILURE);
   }
 
