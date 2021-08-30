@@ -478,9 +478,9 @@ int Initialization(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
     parms.parm.output.timeperframe.numerator = 1;
     parms.parm.output.timeperframe.denominator = OUTPUT_queue->framerate;
 
-    ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_PARM, &parms);
-    if (ret != 0)
-      perror("VIDIOC_S_PARAM failed");
+    const int temp_ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_PARM, &parms);
+    if (temp_ret != 0)
+      perror("Optional frame rate VIDIOC_S_PARAM failed");
   }
 
   // 6. Optional. Set the visible resolution for the stream metadata via
@@ -496,10 +496,10 @@ int Initialization(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
     selection_arg.r.width = OUTPUT_queue->raw_width;
     selection_arg.r.height = OUTPUT_queue->raw_height;
 
-    ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_SELECTION, &selection_arg);
-
-    if (ret != 0)
-      perror("VIDIOC_S_SELECTION failed");
+    const int temp_ret =
+        ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_SELECTION, &selection_arg);
+    if (temp_ret != 0)
+      perror("Optional visible rectangle VIDIOC_S_SELECTION failed");
 
     // TODO(fritz) : check returned values are same as sent values
   }
