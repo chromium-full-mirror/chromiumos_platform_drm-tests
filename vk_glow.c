@@ -4,6 +4,7 @@
  * found in the LICENSE file.
  */
 
+#include <inttypes.h>
 #include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -42,6 +43,16 @@ static void page_flip_handler(int fd, unsigned int frame, unsigned int sec, unsi
 {
 	bool *waiting_for_flip = data;
 	*waiting_for_flip = false;
+}
+
+// Add child to the pNext chain of parent.
+static void chain_add(void *parent, void *child)
+{
+	VkBaseOutStructure *p = parent;
+	VkBaseOutStructure *c = child;
+
+	c->pNext = p->pNext;
+	p->pNext = c;
 }
 
 // Choose a physical device that supports Vulkan 1.1 or later. Exit on failure.
@@ -136,59 +147,134 @@ uint32_t choose_gfx_queue_family(VkPhysicalDevice phys_dev)
 	return family_idx;
 }
 
-bool is_format_valid(VkPhysicalDevice phys_dev, VkFormat format)
+// Fail the test if the image is unsupported.
+static void require_image_support(VkPhysicalDevice phys_dev, VkFormat format,
+				  uint64_t drm_format_mod, uint32_t width, uint32_t height)
 {
+	VkResult res;
+
 	VkFormatProperties2 format_props = {
 		.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2,
 	};
+
+	VkDrmFormatModifierPropertiesListEXT mod_props_list = {
+		.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT,
+	};
+
+	chain_add(&format_props, &mod_props_list);
+
 	vkGetPhysicalDeviceFormatProperties2(phys_dev, format, &format_props);
-	return format_props.formatProperties.linearTilingFeatures &
-			VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
-}
 
-VkImage create_image(VkPhysicalDevice phys_dev, VkDevice dev,
-		struct gbm_bo *bo, VkFormat format)
-{
-	VkImage image;
-	VkExternalImageFormatProperties external_image_format_props = {
-		.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
-	};
-	VkImageFormatProperties2 image_format_props = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
-		.pNext = &external_image_format_props,
-	};
-	VkResult res = vkGetPhysicalDeviceImageFormatProperties2(phys_dev,
-		&(VkPhysicalDeviceImageFormatInfo2){
-			.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
-			.pNext = &(VkPhysicalDeviceExternalImageFormatInfo){
-				.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
-				.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
-			},
-			.format = format,
-			.type = VK_IMAGE_TYPE_2D,
-			.tiling = VK_IMAGE_TILING_LINEAR,
-			.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-		},
-		&image_format_props);
-	check_vk_success(res, "vkGetPhysicalDeviceFormatProperties2");
-
-	VkExternalMemoryFeatureFlags feature_flags = external_image_format_props
-			.externalMemoryProperties
-			.externalMemoryFeatures;
-	if (!(feature_flags & VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)) {
-		bs_debug_error("dma-buf does not support Vulkan import");
+	if (mod_props_list.drmFormatModifierCount == 0) {
+		bs_debug_error("Vulkan does not support VkFormat(%d), "
+			       "drmFormatModifier=0x%"PRIx64, format, drm_format_mod);
 		exit(EXIT_FAILURE);
 	}
 
-	// TODO(crbug.com/1002071): Pass the stride of the imported buffer to vkCreateImage
-	// once the extension is supported on Intel.
-	res = vkCreateImage(dev,
-		&(VkImageCreateInfo){
+	mod_props_list.pDrmFormatModifierProperties = alloca(mod_props_list.drmFormatModifierCount *
+							     sizeof(mod_props_list.pDrmFormatModifierProperties[0]));
+
+	vkGetPhysicalDeviceFormatProperties2(phys_dev, format, &format_props);
+
+	const VkDrmFormatModifierPropertiesEXT *mod_props = NULL;
+
+	for (uint32_t i = 0; i < mod_props_list.drmFormatModifierCount; ++i) {
+		const VkDrmFormatModifierPropertiesEXT *tmp_props =
+			&mod_props_list.pDrmFormatModifierProperties[i];
+
+		if (tmp_props->drmFormatModifier == drm_format_mod) {
+			mod_props = tmp_props;
+			break;
+		}
+
+	}
+
+	if (!mod_props) {
+		bs_debug_error("Vulkan does not support VkFormat(%d), "
+			       "drmFormatModifier=0x%"PRIx64, format, drm_format_mod);
+		exit(EXIT_FAILURE);
+	}
+
+	if (!(mod_props->drmFormatModifierTilingFeatures &
+			VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
+		bs_debug_error("Vulkan supports VkFormat(%d), drmFormatModifier=0x%"PRIx64", "
+			       "but lacks required features", format, drm_format_mod);
+		exit(EXIT_FAILURE);
+	}
+
+	if (mod_props->drmFormatModifierPlaneCount != 1) {
+		bs_debug_error("FINISHME: support drmFormatModifierPlaneCount > 1");
+		exit(EXIT_FAILURE);
+	}
+
+	VkPhysicalDeviceImageFormatInfo2 image_format_info2 = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2,
+		.format = format,
+		.type = VK_IMAGE_TYPE_2D,
+		.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
+		.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+	};
+
+	VkPhysicalDeviceImageDrmFormatModifierInfoEXT image_mod_info = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT,
+		.drmFormatModifier = drm_format_mod,
+	};
+
+	chain_add(&image_format_info2, &image_mod_info);
+
+	VkPhysicalDeviceExternalImageFormatInfo external_image_format_info = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO,
+		.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+	};
+
+	chain_add(&image_format_info2, &external_image_format_info);
+
+	VkImageFormatProperties2 image_format_props2 = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2,
+	};
+
+	VkImageFormatProperties *image_format_props = &image_format_props2.imageFormatProperties;
+
+	VkExternalImageFormatProperties external_image_format_props = {
+		.sType = VK_STRUCTURE_TYPE_EXTERNAL_IMAGE_FORMAT_PROPERTIES,
+	};
+
+	chain_add(&image_format_props2, &external_image_format_props);
+
+	res = vkGetPhysicalDeviceImageFormatProperties2(phys_dev, &image_format_info2,
+							&image_format_props2);
+
+	if (res == VK_ERROR_FORMAT_NOT_SUPPORTED) {
+		bs_debug_error("vkGetPhysicalDeviceFormatProperties2 does not support image");
+		exit(EXIT_FAILURE);
+	}
+
+	check_vk_success(res, "vkGetPhysicalDeviceFormatProperties2");
+
+	if (image_format_props->maxExtent.width < width ||
+	    image_format_props->maxExtent.height < height ||
+	    !(image_format_props->sampleCounts & VK_SAMPLE_COUNT_1_BIT) ||
+	    !(external_image_format_props.externalMemoryProperties.externalMemoryFeatures &
+	      VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT)) {
+		bs_debug_error("vkGetPhysicalDeviceFormatProperties2 does not support image");
+		exit(EXIT_FAILURE);
+	}
+
+	if (external_image_format_props.externalMemoryProperties.externalMemoryFeatures &
+	    VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) {
+		bs_debug_error("FINISHME: support VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT");
+		exit(EXIT_FAILURE);
+	}
+}
+
+VkImage create_image(VkPhysicalDevice phys_dev, VkDevice dev, struct gbm_bo *bo, VkFormat format,
+		     uint64_t drm_format_mod)
+{
+	VkImage image;
+	VkResult res;
+
+	VkImageCreateInfo base_create_info = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-		.pNext = &(VkExternalMemoryImageCreateInfo){
-			.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
-			.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
-		},
 		.imageType = VK_IMAGE_TYPE_2D,
 		.format = format,
 		.extent = (VkExtent3D){
@@ -198,11 +284,34 @@ VkImage create_image(VkPhysicalDevice phys_dev, VkDevice dev,
 		.mipLevels = 1,
 		.arrayLayers = 1,
 		.samples = 1,
-		.tiling = VK_IMAGE_TILING_LINEAR,
+		.tiling = VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT,
 		.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
 		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+	};
+
+	VkImageDrmFormatModifierExplicitCreateInfoEXT mod_create_info = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
+		.drmFormatModifier = drm_format_mod,
+		.drmFormatModifierPlaneCount = 1,
+		.pPlaneLayouts = (VkSubresourceLayout[]) {
+			{
+				.offset = gbm_bo_get_offset(bo, 0),
+				.size = 0, // ignored
+				.rowPitch = gbm_bo_get_stride_for_plane(bo, 0),
+			},
 		},
-		/*pAllocator*/ NULL, &image);
+	};
+
+	chain_add(&base_create_info, &mod_create_info);
+
+	VkExternalMemoryImageCreateInfo external_create_info = {
+		.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
+		.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+	};
+
+	chain_add(&base_create_info, &external_create_info);
+
+	res = vkCreateImage(dev, &base_create_info, NULL, &image);
 	check_vk_success(res, "vkCreateImage");
 
 	return image;
@@ -283,8 +392,12 @@ bool bind_image_bo(VkDevice dev,
 
 int main(int argc, char **argv)
 {
-	const uint32_t gbm_format = GBM_FORMAT_XBGR8888;
+	const uint32_t drm_format = DRM_FORMAT_XBGR8888;
 	const VkFormat format = VK_FORMAT_A8B8G8R8_UNORM_PACK32;
+	const uint64_t drm_format_mod = DRM_FORMAT_MOD_LINEAR;
+	bs_debug_warning("assume display supports DRM_FORMAT_XBGR8888 without querying plane "
+			 "properties");
+
 	VkInstance inst;
 	VkPhysicalDevice phys_dev;
 	uint32_t gfx_queue_family_idx;
@@ -344,21 +457,17 @@ int main(int argc, char **argv)
 		exit(EXIT_FAILURE);
 	}
 
-	if (!is_format_valid(phys_dev, format)) {
-		bs_debug_error("VkPhysicalDevice does not support 0x%x", format);
-		exit(EXIT_FAILURE);
-	}
-
-	const uint32_t num_required_extensions = 2;
-	const char* required_extensions[] = {
+	const char *required_extensions[] = {
 		"VK_KHR_external_memory_fd",
+		"VK_KHR_image_format_list",
 		"VK_EXT_external_memory_dma_buf",
+		"VK_EXT_image_drm_format_modifier",
 	};
 	uint32_t extension_count;
 	vkEnumerateDeviceExtensionProperties(phys_dev, NULL, &extension_count, NULL);
 	VkExtensionProperties available_extensions[extension_count];
 	vkEnumerateDeviceExtensionProperties(phys_dev, NULL, &extension_count, available_extensions);
-	for (uint32_t i = 0; i < num_required_extensions; i++) {
+	for (uint32_t i = 0; i < BS_ARRAY_LEN(required_extensions); i++) {
 		uint32_t j;
 		for (j = 0; j < extension_count; j++) {
 			if (strcmp(required_extensions[i], available_extensions[j].extensionName) == 0) {
@@ -370,6 +479,8 @@ int main(int argc, char **argv)
 			exit(EXIT_FAILURE);
 		}
 	}
+
+	require_image_support(phys_dev, format, drm_format_mod, mode->hdisplay, mode->vdisplay);
 
 	res = vkCreateDevice(phys_dev,
 			     &(VkDeviceCreateInfo){
@@ -385,7 +496,7 @@ int main(int argc, char **argv)
 
 					 },
 				     },
-				 .enabledExtensionCount = num_required_extensions,
+				 .enabledExtensionCount = BS_ARRAY_LEN(required_extensions),
 				 .ppEnabledExtensionNames = required_extensions,
 			     },
 			     /*pAllocator*/ NULL, &dev);
@@ -441,14 +552,10 @@ int main(int argc, char **argv)
 	for (int i = 0; i < BS_ARRAY_LEN(frames); ++i) {
 		struct frame *fr = &frames[i];
 
-		fr->bo = gbm_bo_create(gbm, mode->hdisplay, mode->vdisplay, gbm_format,
-				GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING | GBM_BO_USE_LINEAR);
+		fr->bo = gbm_bo_create_with_modifiers(gbm, mode->hdisplay, mode->vdisplay,
+						      drm_format, &drm_format_mod, 1);
 		if (fr->bo == NULL) {
 			bs_debug_error("failed to create framebuffer's gbm_bo");
-			return 1;
-		}
-		if (gbm_bo_get_modifier(fr->bo)) {
-			bs_debug_error("gmb_bo was created with modifiers");
 			return 1;
 		}
 
@@ -458,7 +565,7 @@ int main(int argc, char **argv)
 			return 1;
 		}
 
-		fr->vk_image = create_image(phys_dev, dev, fr->bo, format);
+		fr->vk_image = create_image(phys_dev, dev, fr->bo, format, drm_format_mod);
 		if (fr->vk_image == VK_NULL_HANDLE) {
 			bs_debug_error("failed to create VkImage");
 			exit(EXIT_FAILURE);
