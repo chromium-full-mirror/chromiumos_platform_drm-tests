@@ -462,6 +462,7 @@ int main(int argc, char **argv)
 		"VK_KHR_image_format_list",
 		"VK_EXT_external_memory_dma_buf",
 		"VK_EXT_image_drm_format_modifier",
+		"VK_EXT_queue_family_foreign",
 	};
 	uint32_t extension_count;
 	vkEnumerateDeviceExtensionProperties(phys_dev, NULL, &extension_count, NULL);
@@ -666,9 +667,7 @@ int main(int argc, char **argv)
 					.dstAccessMask = 0, /** ignored for transfers */
 					.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
 					.newLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-					// TODO(crbug.com/1000666): Replace this with the foreign queue
-					// family once the extension is available on CrOS.
-					.srcQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+					.srcQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
 					.dstQueueFamilyIndex = gfx_queue_family_idx,
 					.image = fr->vk_image,
 					.subresourceRange = (VkImageSubresourceRange){
@@ -730,9 +729,7 @@ int main(int argc, char **argv)
 					.oldLayout = VK_IMAGE_LAYOUT_GENERAL,
 					.newLayout = VK_IMAGE_LAYOUT_GENERAL,
 					.srcQueueFamilyIndex = gfx_queue_family_idx,
-					// TODO(crbug.com/1000666): Replace this with the foreign queue
-					// family once the extension is available on CrOS.
-					.dstQueueFamilyIndex = VK_QUEUE_FAMILY_EXTERNAL,
+					.dstQueueFamilyIndex = VK_QUEUE_FAMILY_FOREIGN_EXT,
 					.image = fr->vk_image,
 					.subresourceRange = (VkImageSubresourceRange){
 				    .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
