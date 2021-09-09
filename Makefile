@@ -84,6 +84,9 @@ CC_BINARY(v4l2_stateful_decoder): LDLIBS += $(DRM_LIBS)
 CC_BINARY(v4l2_stateful_decoder): LDLIBS += -lssl -lcrypto
 
 CC_BINARY(v4l2_stateful_encoder): v4l2_stateful_encoder.o
+ifeq ($(USE_V4LPLUGIN),1)
+CC_BINARY(v4l2_stateful_encoder): LDLIBS += -lv4l2
+endif
 
 CC_BINARY(mapped_access_perf_test): mapped_access_perf_test.o \
 	CC_STATIC_LIBRARY(libbsdrm.pic.a)

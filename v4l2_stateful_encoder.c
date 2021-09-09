@@ -21,6 +21,12 @@
 #include <time.h>
 #include <unistd.h>
 
+#if defined(USE_V4LPLUGIN)
+// Some devices (e.g. Rockchip) have a userspace "libv4l" library to bridge the
+// stateful V4L2 encoder API with a stateless encoder hardware.
+#include <libv4l2.h>
+#endif
+
 // TODO(mcasas): Consider trying all /dev/video-enc* device files if a platform
 // has more than two.
 static const char* kEncodeDeviceFiles[] = {"/dev/video-enc0",
@@ -28,6 +34,14 @@ static const char* kEncodeDeviceFiles[] = {"/dev/video-enc0",
 static const int kInputbufferMaxSize = 4 * 1024 * 1024;
 static const int kRequestBufferCount = 8;
 static const uint32_t kIVFHeaderSignature = v4l2_fourcc('D', 'K', 'I', 'F');
+
+int do_ioctl(int fd, int request, void* data) {
+#if defined(USE_V4LPLUGIN)
+  return v4l2_ioctl(fd, request, data);
+#else
+  return ioctl(fd, request, data);
+#endif
+}
 
 struct mmap_buffers {
   void* start[VIDEO_MAX_PLANES];
@@ -89,7 +103,7 @@ int query_format(int v4lfd, enum v4l2_buf_type type, uint32_t fourcc) {
   memset(&fmtdesc, 0, sizeof(fmtdesc));
 
   fmtdesc.type = type;
-  while (ioctl(v4lfd, VIDIOC_ENUM_FMT, &fmtdesc) == 0) {
+  while (do_ioctl(v4lfd, VIDIOC_ENUM_FMT, &fmtdesc) == 0) {
     if (fourcc == 0)
       print_fourcc(fmtdesc.pixelformat);
     else if (fourcc == fmtdesc.pixelformat)
@@ -106,7 +120,7 @@ void enumerate_menu(int v4lfd, uint32_t id, uint32_t min, uint32_t max) {
 
   querymenu.id = id;
   for (querymenu.index = min; querymenu.index <= max; querymenu.index++) {
-    if (0 == ioctl(v4lfd, VIDIOC_QUERYMENU, &querymenu))
+    if (0 == do_ioctl(v4lfd, VIDIOC_QUERYMENU, &querymenu))
       fprintf(stderr, " %s\n", querymenu.name);
   }
 }
@@ -116,7 +130,7 @@ int verify_capabilities(int v4lfd,
                  uint32_t CAPTURE_format) {
   struct v4l2_capability cap;
   memset(&cap, 0, sizeof(cap));
-  int ret = ioctl(v4lfd, VIDIOC_QUERYCAP, &cap);
+  int ret = do_ioctl(v4lfd, VIDIOC_QUERYCAP, &cap);
   if (ret != 0)
     perror("VIDIOC_QUERYCAP failed");
 
@@ -169,7 +183,7 @@ int queue_OUTPUT_buffer(struct queue* queue,
     v4l2_buffer.m.planes[i].data_offset = 0;
   }
 
-  int ret = ioctl(queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
+  int ret = do_ioctl(queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
   if (ret != 0) {
     perror("VIDIOC_QBUF failed");
     return -1;
@@ -368,7 +382,7 @@ int request_mmap_buffers(struct queue* queue,
     buffer.index = i;
     buffer.length = queue->num_planes;
     buffer.m.planes = planes;
-    ret = ioctl(v4lfd, VIDIOC_QUERYBUF, &buffer);
+    ret = do_ioctl(v4lfd, VIDIOC_QUERYBUF, &buffer);
     if (ret != 0) {
       printf("VIDIOC_QUERYBUF failed: %d\n", ret);
       break;
@@ -407,7 +421,7 @@ int queue_CAPTURE_buffer(struct queue* queue, uint32_t index) {
   v4l2_buffer.m.planes[0].bytesused = buffers[index].length[0];
   v4l2_buffer.m.planes[0].data_offset = 0;
 
-  int ret = ioctl(queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
+  int ret = do_ioctl(queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
   if (ret != 0) {
     perror("VIDIOC_QBUF failed");
   }
@@ -431,7 +445,7 @@ int Initialization(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
     fmt.fmt.pix_mp.plane_fmt[0].sizeimage = kInputbufferMaxSize;
     fmt.fmt.pix_mp.num_planes = 1;
 
-    int ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_FMT, &fmt);
+    int ret = do_ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_FMT, &fmt);
     if (ret != 0)
       perror("VIDIOC_S_FMT failed");
 
@@ -450,7 +464,7 @@ int Initialization(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
     fmt.fmt.pix_mp.height = OUTPUT_queue->raw_height;
     fmt.fmt.pix_mp.num_planes = 1;
 
-    int ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_FMT, &fmt);
+    int ret = do_ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_FMT, &fmt);
     if (ret != 0)
       perror("VIDIOC_S_FMT failed");
 
@@ -478,7 +492,7 @@ int Initialization(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
     parms.parm.output.timeperframe.numerator = 1;
     parms.parm.output.timeperframe.denominator = OUTPUT_queue->framerate;
 
-    const int temp_ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_PARM, &parms);
+    const int temp_ret = do_ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_PARM, &parms);
     if (temp_ret != 0)
       perror("Optional frame rate VIDIOC_S_PARAM failed");
   }
@@ -497,7 +511,7 @@ int Initialization(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
     selection_arg.r.height = OUTPUT_queue->raw_height;
 
     const int temp_ret =
-        ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_SELECTION, &selection_arg);
+        do_ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_SELECTION, &selection_arg);
     if (temp_ret != 0)
       perror("Optional visible rectangle VIDIOC_S_SELECTION failed");
 
@@ -513,7 +527,7 @@ int Initialization(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
     reqbuf.type = OUTPUT_queue->type;
     reqbuf.memory = V4L2_MEMORY_MMAP;
 
-    ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_REQBUFS, &reqbuf);
+    ret = do_ioctl(OUTPUT_queue->v4lfd, VIDIOC_REQBUFS, &reqbuf);
     if (ret != 0)
       perror("VIDIOC_REQBUFS failed");
 
@@ -531,7 +545,7 @@ int Initialization(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
     reqbuf.type = CAPTURE_queue->type;
     reqbuf.memory = V4L2_MEMORY_MMAP;
 
-    ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_REQBUFS, &reqbuf);
+    ret = do_ioctl(OUTPUT_queue->v4lfd, VIDIOC_REQBUFS, &reqbuf);
     if (ret != 0)
       perror("VIDIOC_REQBUFS failed");
 
@@ -555,7 +569,7 @@ void disable_unsupported_controls(int v4lfd,
 
     query_ext_ctrl.id = V4L2_CTRL_CLASS_MPEG | encoder_ctrl->id;
 
-    int ret = ioctl(v4lfd, VIDIOC_QUERY_EXT_CTRL, &query_ext_ctrl);
+    int ret = do_ioctl(v4lfd, VIDIOC_QUERY_EXT_CTRL, &query_ext_ctrl);
 
     encoder_ctrl->enabled = (ret == 0);
 
@@ -634,14 +648,14 @@ int set_ext_controls(int v4lfd, const struct encoder_control* encoder_ctrl) {
   ext_ctrls.count = ctrl_cnt;
   ext_ctrls.controls = ext_ctrl;
 
-  const int set_ret = ioctl(v4lfd, VIDIOC_S_EXT_CTRLS, &ext_ctrls);
+  const int set_ret = do_ioctl(v4lfd, VIDIOC_S_EXT_CTRLS, &ext_ctrls);
   if (set_ret != 0)
     perror("VIDIOC_S_EXT_CTRLS failed");
 
   for (uint32_t i = 0; i < ctrl_cnt; ++i)
     ext_ctrl[i].value = 0;
 
-  const int get_ret = ioctl(v4lfd, VIDIOC_G_EXT_CTRLS, &ext_ctrls);
+  const int get_ret = do_ioctl(v4lfd, VIDIOC_G_EXT_CTRLS, &ext_ctrls);
   if (get_ret != 0)
     perror("VIDIOC_G_EXT_CTRLS failed");
 
@@ -673,7 +687,7 @@ int dequeue_buffer(struct queue* queue,
   v4l2_buffer.length = queue->num_planes;
   v4l2_buffer.m.planes = planes;
   v4l2_buffer.m.planes[0].bytesused = 0;
-  int ret = ioctl(queue->v4lfd, VIDIOC_DQBUF, &v4l2_buffer);
+  int ret = do_ioctl(queue->v4lfd, VIDIOC_DQBUF, &v4l2_buffer);
 
   if (ret != 0 && errno != EAGAIN)
     perror("VIDIOC_DQBUF failed");
@@ -701,7 +715,7 @@ void drain(struct queue* OUTPUT_queue,
   cmd.cmd = V4L2_ENC_CMD_STOP;
 
   // V4L2_ENC_CMD_STOP may not be supported, don't worry about result
-  ioctl(CAPTURE_queue->v4lfd, VIDIOC_ENCODER_CMD, &cmd);
+  do_ioctl(CAPTURE_queue->v4lfd, VIDIOC_ENCODER_CMD, &cmd);
 
   // 2. Dequeue buffers
   // The way the encode loop is set up, there shouldn't be any buffers
@@ -719,11 +733,12 @@ void drain(struct queue* OUTPUT_queue,
   }
 
   // 3. Reset by issuing VIDIOC_STREAMOFF
-  int ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_STREAMOFF, &OUTPUT_queue->type);
+  int ret =
+      do_ioctl(OUTPUT_queue->v4lfd, VIDIOC_STREAMOFF, &OUTPUT_queue->type);
   if (ret != 0)
     perror("VIDIOC_STREAMOFF failed on OUTPUT");
 
-  ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_STREAMOFF, &CAPTURE_queue->type);
+  ret = do_ioctl(CAPTURE_queue->v4lfd, VIDIOC_STREAMOFF, &CAPTURE_queue->type);
   if (ret != 0)
     perror("VIDIOC_STREAMOFF failed on CAPTURE");
 }
@@ -784,13 +799,13 @@ int encode(FILE* fp_input,
   }
 
   if (!ret) {
-    ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_STREAMON, &OUTPUT_queue->type);
+    ret = do_ioctl(OUTPUT_queue->v4lfd, VIDIOC_STREAMON, &OUTPUT_queue->type);
     if (ret != 0)
       perror("VIDIOC_STREAMON failed on OUTPUT");
   }
 
   if (!ret) {
-    ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_STREAMON, &CAPTURE_queue->type);
+    ret = do_ioctl(CAPTURE_queue->v4lfd, VIDIOC_STREAMON, &CAPTURE_queue->type);
     if (ret != 0)
       perror("VIDIOC_STREAMON failed on CAPTURE");
   }
@@ -921,7 +936,7 @@ int main(int argc, char* argv[]) {
     ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE,
       V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC),
     ENCODER_CTL(V4L2_CID_MPEG_VIDEO_HEADER_MODE,
-      V4L2_MPEG_VIDEO_HEADER_MODE_SEPARATE),
+      V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME),
     ENCODER_CTL(0, 0)
   };
 
@@ -1027,6 +1042,9 @@ int main(int argc, char* argv[]) {
       open(kEncodeDeviceFiles[index], O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (temp_fd < 0)
       continue;
+#if defined(USE_V4LPLUGIN)
+    v4l2_fd_open(temp_fd, V4L2_DISABLE_CONVERSION);
+#endif
 
     if (verify_capabilities(temp_fd, OUTPUT_format, CAPTURE_format) == 0) {
       v4lfd = temp_fd;
@@ -1078,6 +1096,10 @@ int main(int argc, char* argv[]) {
 
   cleanup_queue(&OUTPUT_queue);
   cleanup_queue(&CAPTURE_queue);
+#if defined(USE_V4LPLUGIN)
+  v4l2_close(v4lfd);
+#endif
+
   close(v4lfd);
 
   return 0;
