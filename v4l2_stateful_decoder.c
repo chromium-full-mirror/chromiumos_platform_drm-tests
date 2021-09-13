@@ -40,6 +40,7 @@ enum logging_levels {
     if (level >= log_run_level) {          \
       fprintf(stream, fmt, ##__VA_ARGS__); \
       fprintf(stream, "\n");               \
+      fflush(stream);                      \
     }                                      \
   } while (0)
 
@@ -259,6 +260,33 @@ bool capabilities(int fd,
     return false;
   }
   return true;
+}
+
+// The V4L2 device may emit events outside of the buffer data path. For event
+// types, see https://www.kernel.org/doc/html/v5.4/media/uapi/v4l/vidioc-dqevent.html#id2
+int subscribe_to_event(int v4lfd, uint32_t event_type, uint32_t id) {
+  struct v4l2_event_subscription sub = {.type = event_type,
+                                        .id = id,
+                                        .flags = 0};
+
+  const int ret = ioctl(v4lfd, VIDIOC_SUBSCRIBE_EVENT, &sub);
+  if (ret != 0)
+    LOG_ERROR("VIDIOC_SUBSCRIBE_EVENT failed: %s.", strerror(errno));
+
+  return ret;
+}
+
+// Dequeues an event from the device. Only subscribed events can be dequeued.
+// If there are no events, the return value is non-zero.
+int dequeue_event(struct queue* queue, uint32_t* type) {
+  // v4l2_event structure will be completely filled out by the driver.
+  struct v4l2_event event;
+
+  int ret = ioctl(queue->v4lfd, VIDIOC_DQEVENT, &event);
+  if (!ret && type)
+    *type = event.type;
+
+  return ret;
 }
 
 int request_mmap_buffers(struct queue* queue,
@@ -521,11 +549,9 @@ int setup_OUTPUT(struct queue* OUTPUT_queue,
 
   // 2. Allocates source (bytestream) buffers via VIDIOC_REQBUFS() on OUTPUT.
   if (!ret) {
-    struct v4l2_requestbuffers reqbuf;
-    memset(&reqbuf, 0, sizeof(reqbuf));
-    reqbuf.count = kRequestBufferCount;
-    reqbuf.type = OUTPUT_queue->type;
-    reqbuf.memory = OUTPUT_queue->memory;
+    struct v4l2_requestbuffers reqbuf = {.count = kRequestBufferCount,
+                                         .type = OUTPUT_queue->type,
+                                         .memory = OUTPUT_queue->memory};
 
     ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_REQBUFS, &reqbuf);
     if (ret != 0)
@@ -597,7 +623,7 @@ int submit_compressed_frame(struct compressed_file* file,
   v4l2_buffer.m.planes[0].data_offset = 0;
   int ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
   if (ret != 0) {
-    LOG_ERROR("VIDIOC_QBUF failed: %s.", strerror(errno));
+    LOG_ERROR("OUTPUT queue: VIDIOC_QBUF failed: %s.", strerror(errno));
     return -1;
   }
 
@@ -662,7 +688,7 @@ int queue_buffer_CAPTURE(struct queue* queue, uint32_t index) {
 
   int ret = ioctl(queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
   if (ret != 0)
-    LOG_ERROR("VIDIOC_QBUF failed: %s.", strerror(errno));
+    LOG_ERROR("CAPTURE queue: VIDIOC_QBUF failed: %s.", strerror(errno));
 
   if (queue->memory == V4L2_MEMORY_DMABUF) {
     for (uint32_t i = 0; i < queue->num_planes; ++i) {
@@ -910,8 +936,7 @@ void write_frame_to_disk(const char* output_file_prefix,
 int dequeue_buffer(struct queue* queue,
                    uint32_t* index,
                    uint32_t* bytesused,
-                   uint32_t* flags,
-                   bool* show_frame) {
+                   uint32_t* flags) {
   struct v4l2_buffer v4l2_buffer;
   struct v4l2_plane planes[VIDEO_MAX_PLANES] = {0};
   memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
@@ -935,16 +960,6 @@ int dequeue_buffer(struct queue* queue,
     *bytesused = v4l2_buffer.m.planes[0].bytesused;
   if (flags)
     *flags = v4l2_buffer.flags;
-
-  // For displayed frames, timestamp values will be increasing for each
-  // frame starting from 1 (which can be configured differently for the
-  // first frame). For non-displayed frames, timestamp values will be 0.
-  // Thus, this info can be used to distinguish non-displayed frames
-  // from displayed frames.
-  if (show_frame) {
-    *show_frame =
-        !(v4l2_buffer.timestamp.tv_sec < kTimestampMarkerForShowFrames);
-  }
 
   return ret;
 }
@@ -1127,7 +1142,7 @@ bool process_opaque_frame(struct queue* CAPTURE_queue,
   {
     uint32_t index = 0;
     const int ret = dequeue_buffer(mdp_OUTPUT_queue, &index, /*bytesused=*/NULL,
-                                   /*flags=*/NULL, /*show_frame=*/NULL);
+                                   /*flags=*/NULL);
     if (ret != 0) {
       LOG_ERROR("Image Processor: mdp_OUTPUT_queue VIDIOC_DQBUF failed: %s.",
           strerror(errno));
@@ -1141,7 +1156,46 @@ bool process_opaque_frame(struct queue* CAPTURE_queue,
   return true;
 }
 
-int decode(struct compressed_file* file,
+// From 4.5.1.9. Dynamic Resolution Change
+// This is called after a source change event is caught, dequeued,
+// and all pending buffers in the |CAPTURE_queue| are drained.
+int handle_dynamic_resolution_change(struct gbm_device* gbm,
+                                     struct queue* CAPTURE_queue,
+                                     uint64_t modifier) {
+  // Calls VIDIOC_STREAMOFF to stop the CAPTURE queue stream.
+  int ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_STREAMOFF, &CAPTURE_queue->type);
+  if (ret != 0)
+    LOG_ERROR("VIDIOC_STREAMOFF failed: %s.", strerror(errno));
+
+  // Deallocates |CAPTURE_queue| buffers via VIDIOC_REQBUFS. Calling
+  // VIDIOC_REQBUFS with |count == 0| tells the device to deallocate the
+  // existing buffers.
+  if (!ret) {
+    cleanup_queue(CAPTURE_queue);
+
+    struct v4l2_requestbuffers reqbuf = {.count = 0,
+                                         .type = CAPTURE_queue->type,
+                                         .memory = CAPTURE_queue->memory};
+
+    ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_REQBUFS, &reqbuf);
+    if (ret != 0) {
+      LOG_ERROR("CAPTURE queue: VIDIOC_REQBUFS failed while deallocating "
+                "buffers: %s.", strerror(errno));
+    }
+  }
+
+  // setup_CAPTURE will call VIDIOC_STREAMON as part of the capture setup
+  // sequence, which starts capture queue streaming.
+  if (!ret) {
+    ret = setup_CAPTURE(gbm, CAPTURE_queue, modifier, kInvalidFrameRate,
+      /*use_CAPTURE_queue_dimensions=*/false);
+  }
+
+  return ret;
+}
+
+int decode(struct gbm_device* gbm,
+           struct compressed_file* file,
            struct queue* CAPTURE_queue,
            struct queue* OUTPUT_queue,
            uint64_t modifier,
@@ -1158,13 +1212,24 @@ int decode(struct compressed_file* file,
   // are controlling it.
   int num_tries = kMaxRetryCount;
 
+  // TODO(nhebert) See if it is possible to have two events dequeue before
+  // the first is handled. Assume "no" for now.
+  bool pending_dynamic_resolution_change = false;
+
   while (ret == 0 && CAPTURE_queue->is_streaming && num_tries != 0) {
     {
+      uint32_t event_type = 0;
+      if (!dequeue_event(CAPTURE_queue, &event_type) &&
+          event_type == V4L2_EVENT_SOURCE_CHANGE) {
+        LOG_INFO("CAPTURE queue experienced a source change.");
+        pending_dynamic_resolution_change = true;
+      }
+
       uint32_t index = 0;
       uint32_t flags = 0;
-      bool show_frame;
-      const int ret_dequeue = dequeue_buffer(CAPTURE_queue, &index, NULL,
-                                             &flags, &show_frame);
+      uint32_t bytesused = 0;
+      const int ret_dequeue = dequeue_buffer(CAPTURE_queue, &index, &bytesused,
+                                             &flags);
       if (ret_dequeue != 0) {
         if (errno != EAGAIN) {
           LOG_ERROR("VIDIOC_DQBUF failed for CAPTURE queue: %s.",
@@ -1178,7 +1243,17 @@ int decode(struct compressed_file* file,
       // Successfully dequeued a buffer. Reset the |num_tries| counter.
       num_tries = kMaxRetryCount;
 
-      if (show_frame && CAPTURE_queue->displayed_frames < frames_to_decode) {
+      const bool is_flag_error_set = (flags & V4L2_BUF_FLAG_ERROR) != 0;
+      const bool is_flag_last_set = (flags & V4L2_BUF_FLAG_LAST) != 0;
+      if (is_flag_last_set)
+        CAPTURE_queue->is_streaming = false;
+
+      // Don't use a buffer flagged with V4L2_BUF_FLAG_ERROR regardless of
+      // |bytesused| or with V4L2_BUF_FLAG_LAST and |bytesused| == 0
+      const bool ignore_buffer = is_flag_error_set ||
+        (is_flag_last_set && (bytesused == 0));
+      if (!ignore_buffer &&
+          CAPTURE_queue->displayed_frames < frames_to_decode) {
         CAPTURE_queue->displayed_frames++;
 
         if (process_opaque_frame_fp) {
@@ -1214,12 +1289,11 @@ int decode(struct compressed_file* file,
           if (print_md5hash)
             map_buffers_and_calculate_md5hash(CAPTURE_queue, index);
         }
-      }
-      else if (flags & V4L2_BUF_FLAG_LAST) {
-        // If |CAPTURE_queue| is streaming, keep queueing and dequeueing
-        // buffers on it until a buffer marked with the V4L2_BUF_FLAG_LAST flag
-        // is dequeued.
-        CAPTURE_queue->is_streaming = false;
+      } else {
+        LOG_DEBUG("Buffer set %s%s%s.",
+                  is_flag_error_set ? "V4L2_BUF_FLAG_ERROR" : "",
+                  (is_flag_error_set && is_flag_last_set) ? " and " : "",
+                  is_flag_last_set ? "V4L2_BUF_FLAG_LAST" : "");
       }
 
       // When the device has decoded |frames_to_decode| displayable frames,
@@ -1229,17 +1303,23 @@ int decode(struct compressed_file* file,
         ret = initiate_drain(OUTPUT_queue);
       }
 
-      // Done with buffer, queue it back up.
-      if (!ret)
+      // Done with buffer, queue it back up unless we got V4L2_BUF_FLAG_LAST
+      if (!ret && !is_flag_last_set)
         ret = queue_buffer_CAPTURE(CAPTURE_queue, index);
+
+      if (!ret && pending_dynamic_resolution_change && is_flag_last_set) {
+        LOG_DEBUG("Handling dynamic resolution change.");
+        pending_dynamic_resolution_change = false;
+        ret = handle_dynamic_resolution_change(gbm, CAPTURE_queue, modifier);
+      }
     }
 
     // A frame was recieved on the CAPTURE queue, that means there should
     // now be a free OUTPUT buffer.
-    {
+    if (!ret) {
       uint32_t index = 0;
       const int ret_dequeue = dequeue_buffer(OUTPUT_queue, &index, NULL,
-                                             NULL, NULL);
+                                             NULL);
       if (ret_dequeue != 0) {
         if (errno != EAGAIN) {
           LOG_ERROR("VIDIOC_DQBUF failed for OUTPUT queue: %s.",
@@ -1514,8 +1594,11 @@ int main(int argc, char* argv[]) {
     process_opaque_frame_fp = &process_opaque_frame;
   }
 
+  if (subscribe_to_event(v4lfd, V4L2_EVENT_SOURCE_CHANGE, 0 /* id */))
+    LOG_FATAL("Unable to subscribe to source change event.");
+
   if (!ret) {
-    ret = decode(&compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
+    ret = decode(gbm, &compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
         output_file_prefix, frames_to_decode, print_md5hash,
         process_opaque_frame_fp, mdp_OUTPUT_queue, mdp_CAPTURE_queue);
   }
