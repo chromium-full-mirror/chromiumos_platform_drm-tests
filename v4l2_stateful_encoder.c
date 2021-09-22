@@ -937,6 +937,10 @@ int main(int argc, char* argv[]) {
       V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC),
     ENCODER_CTL(V4L2_CID_MPEG_VIDEO_HEADER_MODE,
       V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME),
+#if defined(USE_V4LPLUGIN)
+    // We need to explicitly request SPSPPS otherwise libv4l doesn't add it.
+    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR, 1),
+#endif
     ENCODER_CTL(0, 0)
   };
 
