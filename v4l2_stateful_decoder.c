@@ -202,14 +202,18 @@ int capabilities(int v4lfd,
 
   if (!query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
                     compressed_format)) {
-    LOG_ERROR("Supported compressed formats:");
+    char fourcc_str[FOURCC_SIZE + 1];
+    fourcc_to_string(compressed_format, fourcc_str);
+    LOG_ERROR("%s is not supported, supported formats are...", fourcc_str);
     query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 0);
     ret = 1;
   }
 
   if (!query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                     uncompressed_format)) {
-    LOG_ERROR("Supported uncompressed formats:");
+    char fourcc_str[FOURCC_SIZE + 1];
+    fourcc_to_string(uncompressed_format, fourcc_str);
+    LOG_ERROR("%s is not supported, supported formats are...", fourcc_str);
     query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, 0);
     ret = 1;
   }
@@ -940,7 +944,7 @@ static const struct option longopts[] = {
     {"write", no_argument, NULL, 'w'},
     {"max", required_argument, NULL, 'm'},
     {"buffer", no_argument, NULL, 'b'},
-    {"output_fmt", no_argument, NULL, 'o'},
+    {"output_fmt", required_argument, NULL, 'o'},
     {"log_level", required_argument, NULL, 'l'},
     {"md5", no_argument, NULL, 'd'},
     {0, 0, 0, 0},
@@ -1049,7 +1053,7 @@ int main(int argc, char* argv[]) {
 
   if (capabilities(v4lfd, compressed_file.header.fourcc, uncompressed_fourcc) !=
       0)
-    LOG_FATAL("Capabilities not present for decode.");
+    LOG_FATAL("Not enough capabilities present for decoding.");
 
   struct queue OUTPUT_queue = {.v4lfd = v4lfd,
                                .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
