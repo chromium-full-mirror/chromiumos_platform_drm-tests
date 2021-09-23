@@ -855,80 +855,78 @@ int decode(struct compressed_file* file,
            bool print_md5hash) {
   int ret = 0;
 
-  if (!ret) {
-    while (CAPTURE_queue->processed_frames < OUTPUT_queue->processed_frames) {
-      {
-        uint32_t index = 0;
-        uint32_t flags = 0;
-        bool show_frame;
-        const int ret_dequeue = dequeue_buffer(CAPTURE_queue, &index, NULL,
-                                               &flags, &show_frame);
-        if (ret_dequeue != 0) {
-          if (errno != EAGAIN) {
-            LOG_ERROR("VIDIOC_DQBUF failed for CAPTURE queue: %s.",
-                      strerror(errno));
-            ret = ret_dequeue;
-            break;
-          }
-          continue;
-        }
-
-        if (show_frame) {
-          CAPTURE_queue->displayed_frames++;
-          if (output_file) {
-            write_file_to_disk(output_file, CAPTURE_queue, index,
-                               CAPTURE_queue->processed_frames, show_frame);
-          }
-        }
-
-        CAPTURE_queue->processed_frames++;
-
-        if (print_md5hash && show_frame) {
-          LOG_INFO("frame # %d - ", CAPTURE_queue->displayed_frames);
-
-          struct md5_hash hash = compute_md5hash(CAPTURE_queue, index);
-
-          for (int n = 0; n < 16; ++n)
-            printf("%02x", hash.bytes[n]);
-          printf("\n");
-        }
-
-        // Break out of the decode loop if V4L2_BUF_FLAG_LAST is set.
-        if (CAPTURE_queue->buf_last_flag_has_been_set) {
-          LOG_INFO("CAPTURE_queue produced last buffer.");
+  while (CAPTURE_queue->processed_frames < OUTPUT_queue->processed_frames) {
+    {
+      uint32_t index = 0;
+      uint32_t flags = 0;
+      bool show_frame;
+      const int ret_dequeue = dequeue_buffer(CAPTURE_queue, &index, NULL,
+                                             &flags, &show_frame);
+      if (ret_dequeue != 0) {
+        if (errno != EAGAIN) {
+          LOG_ERROR("VIDIOC_DQBUF failed for CAPTURE queue: %s.",
+                    strerror(errno));
+          ret = ret_dequeue;
           break;
         }
-
-        // Done with buffer, queue it back up.
-        ret = queue_buffer_CAPTURE(CAPTURE_queue, index);
+        continue;
       }
 
-      // A frame was recieved on the CAPTURE queue, that means there should
-      // now be a free OUTPUT buffer.
-      {
-        uint32_t index = 0;
-        const int ret_dequeue = dequeue_buffer(OUTPUT_queue, &index, NULL,
-                                               NULL, NULL);
-        if (ret_dequeue != 0) {
-          if (errno != EAGAIN) {
-            LOG_ERROR("VIDIOC_DQBUF failed for OUTPUT queue: %s.",
-                      strerror(errno));
-            ret = ret_dequeue;
-            break;
-          }
-          continue;
+      if (show_frame) {
+        CAPTURE_queue->displayed_frames++;
+        if (output_file) {
+          write_file_to_disk(output_file, CAPTURE_queue, index,
+                             CAPTURE_queue->processed_frames, show_frame);
         }
-
-        submit_compressed_frame(file, OUTPUT_queue, index, frames_to_decode);
       }
+
+      CAPTURE_queue->processed_frames++;
+
+      if (print_md5hash && show_frame) {
+        LOG_INFO("frame # %d - ", CAPTURE_queue->displayed_frames);
+
+        struct md5_hash hash = compute_md5hash(CAPTURE_queue, index);
+
+        for (int n = 0; n < 16; ++n)
+          printf("%02x", hash.bytes[n]);
+        printf("\n");
+      }
+
+      // Break out of the decode loop if V4L2_BUF_FLAG_LAST is set.
+      if (CAPTURE_queue->buf_last_flag_has_been_set) {
+        LOG_INFO("CAPTURE_queue produced last buffer.");
+        break;
+      }
+
+      // Done with buffer, queue it back up.
+      ret = queue_buffer_CAPTURE(CAPTURE_queue, index);
     }
 
-    drain(OUTPUT_queue, CAPTURE_queue);
+    // A frame was recieved on the CAPTURE queue, that means there should
+    // now be a free OUTPUT buffer.
+    {
+      uint32_t index = 0;
+      const int ret_dequeue = dequeue_buffer(OUTPUT_queue, &index, NULL,
+                                             NULL, NULL);
+      if (ret_dequeue != 0) {
+        if (errno != EAGAIN) {
+          LOG_ERROR("VIDIOC_DQBUF failed for OUTPUT queue: %s.",
+                    strerror(errno));
+          ret = ret_dequeue;
+          break;
+        }
+        continue;
+      }
 
-    LOG_INFO("%d frames decoded, %d displayable, %d non-visible.",
-             CAPTURE_queue->processed_frames, CAPTURE_queue->displayed_frames,
-             CAPTURE_queue->processed_frames - CAPTURE_queue->displayed_frames);
+      submit_compressed_frame(file, OUTPUT_queue, index, frames_to_decode);
+    }
   }
+
+  drain(OUTPUT_queue, CAPTURE_queue);
+
+  LOG_INFO("%d frames decoded, %d displayable, %d non-visible.",
+           CAPTURE_queue->processed_frames, CAPTURE_queue->displayed_frames,
+           CAPTURE_queue->processed_frames - CAPTURE_queue->displayed_frames);
 
   return ret;
 }
