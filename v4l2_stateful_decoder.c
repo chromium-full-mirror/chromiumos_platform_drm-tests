@@ -12,6 +12,7 @@
 #include <limits.h>
 #include <linux/videodev2.h>
 #include <openssl/md5.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -53,6 +54,11 @@ enum logging_levels {
 // P010 had not landed as an official V4L2 format yet. Once it has remove this.
 #ifndef V4L2_PIX_FMT_P010
 #define V4L2_PIX_FMT_P010    v4l2_fourcc('P', '0', '1', '0') /* 15  Y/CbCr 4:2:0 10-bit per pixel*/
+#endif
+// Only available in kernels 5.4 and later.
+#ifndef V4L2_PIX_FMT_NV12_UBWC
+#define V4L2_PIX_FMT_NV12_UBWC v4l2_fourcc('Q', '1', '2', '8') /* UBWC 8-bit Y/CbCr 4:2:0  */
+
 #endif
 
 static const char* kDecodeDevice = "/dev/video-dec0";
@@ -958,7 +964,7 @@ int main(int argc, char* argv[]) {
   bool print_md5hash = false;
   uint32_t frames_to_decode = UINT_MAX;
   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
-  uint32_t uncompressed_fourcc = v4l2_fourcc('N', 'V', '1', '2');
+  uint32_t uncompressed_fourcc = V4L2_PIX_FMT_NV12;
   uint32_t CAPTURE_memory = V4L2_MEMORY_DMABUF;
 
   while ((c = getopt_long(argc, argv, "wbdm:f:o:l:", longopts, NULL)) != -1) {
@@ -980,7 +986,7 @@ int main(int argc, char* argv[]) {
           uncompressed_fourcc =
               v4l2_fourcc(toupper(optarg[0]), toupper(optarg[1]),
                           toupper(optarg[2]), toupper(optarg[3]));
-          if (uncompressed_fourcc == v4l2_fourcc('Q', '1', '2', '8'))
+          if (uncompressed_fourcc == V4L2_PIX_FMT_NV12_UBWC)
             modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
         }
         break;
@@ -1011,7 +1017,7 @@ int main(int argc, char* argv[]) {
   fourcc_to_string(uncompressed_fourcc, fourcc);
   LOG_INFO("CAPTURE format: %s", fourcc);
 
-  if (uncompressed_fourcc == v4l2_fourcc('Q', '1', '2', '8'))
+  if (uncompressed_fourcc == V4L2_PIX_FMT_NV12_UBWC)
     LOG_INFO("Compressed format, setting modifier.");
 
   if (!file_name) {
