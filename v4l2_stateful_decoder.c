@@ -275,14 +275,15 @@ int request_dmabuf_buffers(struct gbm_device* gbm,
   CAPTURE_queue->cnt = count;
 
   uint32_t gbm_format;
-  if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12) {
+  if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12 ||
+      CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
     gbm_format = GBM_FORMAT_NV12;
   } else if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_P010) {
     gbm_format = GBM_FORMAT_P010;
   } else {
     char fourcc_str[FOURCC_SIZE + 1];
     fourcc_to_string(CAPTURE_queue->fourcc, fourcc_str);
-    LOG_ERROR("Support for %s as an output format is not present.", fourcc_str);
+    LOG_ERROR("%s format not supported for the CAPTURE_queue.", fourcc_str);
     return -1;
   }
 
