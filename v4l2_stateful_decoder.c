@@ -135,9 +135,11 @@ bool is_vp9(uint32_t fourcc) {
     (fourcc >> 16 & 0xff) == '9';
 }
 
-void fourcc_to_string(uint32_t fourcc, char* fourcc_string) {
+char* fourcc_to_string(uint32_t fourcc, char* fourcc_string) {
   sprintf(fourcc_string, "%c%c%c%c", fourcc & 0xff, fourcc >> 8 & 0xff,
           fourcc >> 16 & 0xff, fourcc >> 24 & 0xff);
+  // Return the pointer for conveniency.
+  return fourcc_string;
 }
 
 struct compressed_file open_file(const char* file_name) {
@@ -159,8 +161,7 @@ struct compressed_file open_file(const char* file_name) {
     file.fp = fp;
 
     char fourcc[FOURCC_SIZE + 1];
-    fourcc_to_string(file.header.fourcc, fourcc);
-    LOG_INFO("OUTPUT format: %s", fourcc);
+    LOG_INFO("OUTPUT format: %s", fourcc_to_string(file.header.fourcc, fourcc));
 
     LOG_INFO("Ivf file header: %d x %d", file.header.width, file.header.height);
     // |width| and |height| should be even numbers.
@@ -184,8 +185,7 @@ int query_format(int v4lfd, enum v4l2_buf_type type, uint32_t fourcc) {
   while (ioctl(v4lfd, VIDIOC_ENUM_FMT, &fmtdesc) == 0) {
     if (fourcc == 0) {
       char fourcc_str[FOURCC_SIZE + 1];
-      fourcc_to_string(fmtdesc.pixelformat, fourcc_str);
-      LOG_INFO("%s", fourcc_str);
+      LOG_INFO("%s", fourcc_to_string(fmtdesc.pixelformat, fourcc_str));
     } else if (fourcc == fmtdesc.pixelformat)
       return 1;
     fmtdesc.index++;
@@ -209,8 +209,8 @@ int capabilities(int v4lfd,
   if (!query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
                     compressed_format)) {
     char fourcc_str[FOURCC_SIZE + 1];
-    fourcc_to_string(compressed_format, fourcc_str);
-    LOG_ERROR("%s is not supported, supported formats are...", fourcc_str);
+    LOG_ERROR("%s is not supported, supported formats are...",
+        fourcc_to_string(compressed_format, fourcc_str));
     query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 0);
     ret = 1;
   }
@@ -218,8 +218,8 @@ int capabilities(int v4lfd,
   if (!query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                     uncompressed_format)) {
     char fourcc_str[FOURCC_SIZE + 1];
-    fourcc_to_string(uncompressed_format, fourcc_str);
-    LOG_ERROR("%s is not supported, supported formats are...", fourcc_str);
+    LOG_ERROR("%s is not supported, supported formats are...",
+        fourcc_to_string(uncompressed_format, fourcc_str));
     query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, 0);
     ret = 1;
   }
@@ -288,8 +288,8 @@ int request_dmabuf_buffers(struct gbm_device* gbm,
     gbm_format = GBM_FORMAT_P010;
   } else {
     char fourcc_str[FOURCC_SIZE + 1];
-    fourcc_to_string(CAPTURE_queue->fourcc, fourcc_str);
-    LOG_ERROR("%s format not supported for the CAPTURE_queue.", fourcc_str);
+    LOG_ERROR("%s format not supported for the CAPTURE_queue",
+        fourcc_to_string(CAPTURE_queue->fourcc, fourcc_str));
     return -1;
   }
 
@@ -434,8 +434,10 @@ int setup_OUTPUT(struct queue* OUTPUT_queue) {
     if (ret != 0)
       LOG_ERROR("VIDIOC_REQBUFS failed: %s.", strerror(errno));
 
-    LOG_INFO("%d buffers requested, %d buffers for compressed data returned.",
-             kRequestBufferCount, reqbuf.count);
+    char fourcc[FOURCC_SIZE + 1];
+    LOG_INFO("%d buffers requested, %d buffers for compressed data (%s) "
+        "returned.", kRequestBufferCount, reqbuf.count,
+        fourcc_to_string(OUTPUT_queue->fourcc, fourcc));
 
     ret = request_mmap_buffers(OUTPUT_queue, &reqbuf);
   }
@@ -663,8 +665,10 @@ int setup_CAPTURE(struct gbm_device* gbm,
     if (ret != 0)
       LOG_ERROR("VIDIOC_REQBUFS failed: %s.", strerror(errno));
 
-    LOG_INFO("%d buffers requested, %d buffers for decoded data returned.",
-             kRequestBufferCount, reqbuf.count);
+    char fourcc[FOURCC_SIZE + 1];
+    LOG_INFO("%d buffers requested, %d buffers for decoded data (%s) "
+        "returned.", kRequestBufferCount, reqbuf.count,
+        fourcc_to_string(CAPTURE_queue->fourcc, fourcc));
 
     if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF)
       ret = request_dmabuf_buffers(gbm, CAPTURE_queue, modifier, reqbuf.count);
@@ -1012,8 +1016,7 @@ int main(int argc, char* argv[]) {
     LOG_INFO("Only decoding a max of %d frames.", frames_to_decode);
 
   char fourcc[FOURCC_SIZE + 1];
-  fourcc_to_string(uncompressed_fourcc, fourcc);
-  LOG_INFO("CAPTURE format: %s", fourcc);
+  LOG_INFO("CAPTURE format: %s", fourcc_to_string(uncompressed_fourcc, fourcc));
 
   if (uncompressed_fourcc == V4L2_PIX_FMT_NV12_UBWC)
     LOG_INFO("Compressed format, setting modifier.");
