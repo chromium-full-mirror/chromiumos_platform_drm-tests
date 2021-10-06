@@ -66,6 +66,7 @@ static const int kInputbufferMaxSize = 4 * 1024 * 1024;
 static const int kRequestBufferCount = 8;
 static const int kTimestampMarkerForShowFrames = 1;
 static const uint32_t kIVFHeaderSignature = v4l2_fourcc('D', 'K', 'I', 'F');
+static const uint32_t kInvalidFrameRate = 0;
 
 static int log_run_level = DEFAULT_LOG_LEVEL;
 
@@ -613,7 +614,8 @@ int queue_buffer_CAPTURE(struct queue* queue, uint32_t index) {
 // 4.5.1.6
 int setup_CAPTURE(struct gbm_device* gbm,
                   struct queue* CAPTURE_queue,
-                  uint64_t modifier) {
+                  uint64_t modifier,
+                  uint32_t coded_frame_rate) {
   int ret = 0;
 
   // 1. Calls VIDIOC_G_FMT() on the CAPTURE queue to get format for the
@@ -651,6 +653,27 @@ int setup_CAPTURE(struct gbm_device* gbm,
     ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_FMT, &fmt);
     if (ret != 0)
       LOG_ERROR("VIDIOC_S_FMT failed: %s.", strerror(errno));
+  }
+
+  // 5. (Optional) Sets the coded frame interval on the CAPTURE queue via
+  // VIDIOC_S_PARM. Support for this feature is signaled by the
+  // V4L2_FMT_FLAG_ENC_CAP_FRAME_INTERVAL format flag.
+  if (!ret && coded_frame_rate != kInvalidFrameRate) {
+    struct v4l2_streamparm parms;
+    memset(&parms, 0, sizeof(parms));
+    parms.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+
+    // TODO(b/202758590): Handle non-integral coded_frame_rate
+    parms.parm.output.timeperframe.numerator = 1;
+    parms.parm.output.timeperframe.denominator = coded_frame_rate;
+
+    LOG_INFO("Time per frame set to %d/%d seconds",
+             parms.parm.output.timeperframe.numerator,
+             parms.parm.output.timeperframe.denominator);
+
+    ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_PARM, &parms);
+    if (ret != 0)
+      LOG_ERROR("VIDIOC_S_PARM failed: %s.", strerror(errno));
   }
 
   // 10. Allocates CAPTURE buffers via VIDIOC_REQBUFS() on the CAPTURE queue.
@@ -943,6 +966,7 @@ static void print_help(const char* argv0) {
   printf("  -b, --buffer      use mmap instead of dmabuf\n");
   printf("  -o, --output_fmt  fourcc of output format\n");
   printf("  -l, --log_level   specifies log level, 0:info 1:error 2:fatal \n");
+  printf("  -r, --frame_rate  (optional) specify a frame rate (Hz)\n");
   printf(
       "  -d, --md5         compute md5 hash for each decoded visible frame "
       "in I420 format\n");
@@ -956,6 +980,7 @@ static const struct option longopts[] = {
     {"output_fmt", required_argument, NULL, 'o'},
     {"log_level", required_argument, NULL, 'l'},
     {"md5", no_argument, NULL, 'd'},
+    {"frame_rate", required_argument, NULL, 'r'},
     {0, 0, 0, 0},
 };
 
@@ -965,11 +990,12 @@ int main(int argc, char* argv[]) {
   bool write_out = false;
   bool print_md5hash = false;
   uint32_t frames_to_decode = UINT_MAX;
+  uint32_t frame_rate = kInvalidFrameRate;
   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
   uint32_t uncompressed_fourcc = V4L2_PIX_FMT_NV12;
   uint32_t CAPTURE_memory = V4L2_MEMORY_DMABUF;
 
-  while ((c = getopt_long(argc, argv, "wbdm:f:o:l:", longopts, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "wbdm:f:o:l:r:", longopts, NULL)) != -1) {
     switch (c) {
       case 'f':
         file_name = strdup(optarg);
@@ -1004,6 +1030,14 @@ int main(int argc, char* argv[]) {
       }
       case 'd':
         print_md5hash = true;
+        break;
+      case 'r':
+        frame_rate = atoi(optarg);
+        if (frame_rate == kInvalidFrameRate)
+        {
+          LOG_FATAL("Invalid frame rate provided - %s. --frame_rate requires "
+                    "positive integer less than 2^32.", optarg);
+        }
         break;
       default:
         break;
@@ -1085,7 +1119,7 @@ int main(int argc, char* argv[]) {
                                 .processed_frames = 0,
                                 .displayed_frames = 0};
   if (!ret)
-    ret = setup_CAPTURE(gbm, &CAPTURE_queue, modifier);
+    ret = setup_CAPTURE(gbm, &CAPTURE_queue, modifier, frame_rate);
 
   if (!ret) {
     ret = decode(&compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
