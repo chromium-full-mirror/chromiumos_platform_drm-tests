@@ -92,7 +92,7 @@ struct queue {
   uint32_t coded_height;
   uint32_t cnt;
   uint32_t num_planes;
-  uint32_t memory;
+  enum v4l2_memory memory;  // V4L2_MEMORY_(MMAP|DMABUF) etc.
   uint32_t processed_frames;
   uint32_t displayed_frames;
   // Set to true when a frame is recieved with V4L2_BUF_FLAG_LAST set. This
