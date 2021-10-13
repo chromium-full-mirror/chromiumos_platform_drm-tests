@@ -743,7 +743,6 @@ int setup_CAPTURE(struct gbm_device* gbm,
 void write_file_to_disk(FILE* fp,
                         struct queue* CAPTURE_queue,
                         uint32_t queue_index,
-                        uint32_t frame_index,
                         bool show_frame) {
   if (V4L2_MEMORY_DMABUF == CAPTURE_queue->memory) {
     struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
@@ -922,10 +921,8 @@ int decode(struct compressed_file* file,
 
       if (show_frame) {
         CAPTURE_queue->displayed_frames++;
-        if (output_file) {
-          write_file_to_disk(output_file, CAPTURE_queue, index,
-                             CAPTURE_queue->processed_frames, show_frame);
-        }
+        if (output_file)
+          write_file_to_disk(output_file, CAPTURE_queue, index, show_frame);
       }
 
       CAPTURE_queue->processed_frames++;
