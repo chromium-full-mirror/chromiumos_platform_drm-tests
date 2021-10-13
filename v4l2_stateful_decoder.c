@@ -26,6 +26,7 @@
 #define FOURCC_SIZE 4
 
 enum logging_levels {
+  kLoggingDebug = -1,
   kLoggingInfo = 0,
   kLoggingError,
   kLoggingFatal,
@@ -42,6 +43,7 @@ enum logging_levels {
     }                                      \
   } while (0)
 
+#define LOG_DEBUG(fmt, ...) LOG(kLoggingDebug, stdout, fmt, ##__VA_ARGS__)
 #define LOG_INFO(fmt, ...) LOG(kLoggingInfo, stdout, fmt, ##__VA_ARGS__)
 #define LOG_ERROR(fmt, ...) LOG(kLoggingError, stderr, fmt, ##__VA_ARGS__)
 #define LOG_FATAL(fmt, ...)                         \
@@ -610,8 +612,9 @@ int queue_buffer_CAPTURE(struct queue* queue, uint32_t index) {
   return ret;
 }
 
-// This is the output queue that will produce uncompressed frames.
-// 4.5.1.6
+// This is the output queue that will produce uncompressed frames, see 4.5.1.6
+// Capture Setup
+// https://www.kernel.org/doc/html/v5.4/media/uapi/v4l/dev-decoder.html#capture-setup
 int setup_CAPTURE(struct gbm_device* gbm,
                   struct queue* CAPTURE_queue,
                   uint64_t modifier,
@@ -629,12 +632,30 @@ int setup_CAPTURE(struct gbm_device* gbm,
     if (ret != 0)
       LOG_ERROR("VIDIOC_G_FMT failed: %s.", strerror(errno));
 
+    assert(CAPTURE_queue->fourcc == fmt.fmt.pix_mp.pixelformat);
+
+    // Oftentimes the driver will give us back the appropriately aligned sizes.
+    // Pick them up here.
+    if (CAPTURE_queue->coded_width != fmt.fmt.pix_mp.width ||
+        CAPTURE_queue->coded_height != fmt.fmt.pix_mp.height) {
+      LOG_DEBUG("CAPTURE queue provided adjusted coded dimensions: %dx%d -->"
+          "%dx%d",CAPTURE_queue->coded_width, CAPTURE_queue->coded_height,
+          fmt.fmt.pix_mp.width , fmt.fmt.pix_mp.height);
+    }
     CAPTURE_queue->coded_width = fmt.fmt.pix_mp.width;
     CAPTURE_queue->coded_height = fmt.fmt.pix_mp.height;
+
+    if (CAPTURE_queue->num_planes != fmt.fmt.pix_mp.num_planes) {
+      LOG_DEBUG("CAPTURE queue provided adjusted num planes: %d --> %d",
+        CAPTURE_queue->num_planes, fmt.fmt.pix_mp.num_planes);
+    }
     CAPTURE_queue->num_planes = fmt.fmt.pix_mp.num_planes;
 
-    LOG_INFO("CAPTURE: %d x %d", fmt.fmt.pix_mp.width, fmt.fmt.pix_mp.height);
-    LOG_INFO("num_planes = %d", fmt.fmt.pix_mp.num_planes);
+    char fourcc[FOURCC_SIZE + 1];
+    LOG_INFO("CAPTURE queue: width=%d, height=%d, format=%s, num_planes=%d",
+      CAPTURE_queue->coded_width, CAPTURE_queue->coded_height,
+      fourcc_to_string(CAPTURE_queue->fourcc, fourcc),
+      CAPTURE_queue->num_planes);
   }
 
   // 4. Optional. Sets the CAPTURE format via VIDIOC_S_FMT() on the CAPTURE
@@ -965,11 +986,11 @@ static void print_help(const char* argv0) {
   printf("  -m, --max         max number of visible frames to decode\n");
   printf("  -b, --buffer      use mmap instead of dmabuf\n");
   printf("  -o, --output_fmt  fourcc of output format\n");
-  printf("  -l, --log_level   specifies log level, 0:info 1:error 2:fatal \n");
+  printf("  -l, --log_level   specifies log level, 0:debug 1:info 2:error "
+                             "3:fatal (default: %d)\n", DEFAULT_LOG_LEVEL);
   printf("  -r, --frame_rate  (optional) specify a frame rate (Hz)\n");
-  printf(
-      "  -d, --md5         compute md5 hash for each decoded visible frame "
-      "in I420 format\n");
+  printf("  -d, --md5         compute md5 hash for each decoded visible frame "
+                             "in I420 format\n");
 }
 
 static const struct option longopts[] = {
@@ -1019,7 +1040,7 @@ int main(int argc, char* argv[]) {
         }
         break;
       case 'l': {
-        const uint32_t specified_log_run_level = atoi(optarg);
+        const int specified_log_run_level = atoi(optarg);
         if (specified_log_run_level >= kLoggingLevelMax) {
           LOG_INFO("Undefined log level %d, using default log level instead.",
                    specified_log_run_level);
