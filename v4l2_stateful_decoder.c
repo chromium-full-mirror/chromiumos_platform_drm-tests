@@ -632,7 +632,10 @@ int setup_CAPTURE(struct gbm_device* gbm,
     if (ret != 0)
       LOG_ERROR("VIDIOC_G_FMT failed: %s.", strerror(errno));
 
-    assert(CAPTURE_queue->fourcc == fmt.fmt.pix_mp.pixelformat);
+    // |CAPTURE_queue| might be configured for Q128, in that case we simply
+    // ignore it; we'll force |CAPTURE_queue->fourcc| further below.
+    assert(CAPTURE_queue->fourcc == fmt.fmt.pix_mp.pixelformat ||
+           fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12_UBWC);
 
     // Oftentimes the driver will give us back the appropriately aligned sizes.
     // Pick them up here.
