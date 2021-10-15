@@ -354,19 +354,26 @@ void nv12_to_i420(uint32_t display_width,
   }
 }
 
-struct md5_hash compute_md5hash(const void *data, size_t len) {
+void compute_and_print_md5hash(const void *data,
+                               size_t len,
+                               uint32_t frame_index) {
   struct md5_hash hash;
   MD5_CTX ctx;
 
   MD5_Init(&ctx);
   MD5_Update(&ctx, data, len);
   MD5_Final(hash.bytes, &ctx);
-  return hash;
+
+  // This printout follows the ways of Tast PlatformDecoding. Don't change !
+  LOG_INFO("frame # %d - ", frame_index);
+  for (int n = 0; n < 16; ++n)
+    printf("%02x", hash.bytes[n]);
+  printf("\n");
 }
 
-// Computes and prints the md5 hash for the |queue_index| frame.
-void compute_and_print_md5hash(struct queue* CAPTURE_queue,
-                                uint32_t queue_index) {
+// Maps |CAPTURE_queue|s buffer at |queue_index| and calculates its md5 sum.
+void map_buffers_and_calculate_md5hash(struct queue* CAPTURE_queue,
+                                       uint32_t queue_index) {
   // TODO: needs to handle V4L2_MEMORY_MMAP case
   assert(CAPTURE_queue->memory == V4L2_MEMORY_DMABUF);
   // TODO: only handles 8 bit pixels
@@ -404,18 +411,11 @@ void compute_and_print_md5hash(struct queue* CAPTURE_queue,
   nv12_to_i420(display_width, display_height, buffer_width, buffer_height,
                buffer_nv12, buffer_i420);
 
-  struct md5_hash hash = compute_md5hash(buffer_i420,
-                                         buffer_i420_size_in_bytes);
+  compute_and_print_md5hash(buffer_i420, buffer_i420_size_in_bytes,
+                            CAPTURE_queue->displayed_frames);
 
   free(buffer_i420);
-
   munmap(buffer_nv12, buffer_size);
-
-  // This printout follows the ways of Tast PlatformDecoding. Don't change !
-  LOG_INFO("frame # %d - ", CAPTURE_queue->displayed_frames);
-  for (int n = 0; n < 16; ++n)
-    printf("%02x", hash.bytes[n]);
-  printf("\n");
 }
 
 // This is the input queue that will take compressed data.
@@ -1150,13 +1150,22 @@ int decode(struct compressed_file* file,
                                 mdp_CAPTURE_queue_buffer_index);
           }
 
+          if (print_md5hash &&
+              mdp_CAPTURE_queue_buffer_index != kInvalidBufferIndex) {
+            compute_and_print_md5hash(
+                mdp_CAPTURE_queue->buffers[mdp_CAPTURE_queue_buffer_index]
+                    .start[0],
+                mdp_CAPTURE_queue->buffers[mdp_CAPTURE_queue_buffer_index]
+                    .length[0],
+                CAPTURE_queue->displayed_frames);
+          }
         } else {
           if (output_file)
             write_frame_to_disk(output_file, CAPTURE_queue, index);
-        }
 
-        if (print_md5hash)
-          compute_and_print_md5hash(CAPTURE_queue, index);
+          if (print_md5hash)
+            map_buffers_and_calculate_md5hash(CAPTURE_queue, index);
+        }
       }
 
       // Break out of the decode loop if V4L2_BUF_FLAG_LAST is set.
