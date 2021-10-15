@@ -70,6 +70,8 @@ static const int kTimestampMarkerForShowFrames = 1;
 static const uint32_t kIVFHeaderSignature = v4l2_fourcc('D', 'K', 'I', 'F');
 static const uint32_t kInvalidFrameRate = 0;
 
+static const char* kImageProcessorDevice = "/dev/image-proc0";
+
 static int log_run_level = DEFAULT_LOG_LEVEL;
 
 struct mmap_buffers {
@@ -1179,6 +1181,72 @@ int main(int argc, char* argv[]) {
       /*use_CAPTURE_queue_dimensions=*/false);
   }
 
+  int mdp_fd = -1;
+  struct queue* mdp_OUTPUT_queue = NULL;
+  struct queue* mdp_CAPTURE_queue = NULL;
+  if (!ret && uncompressed_fourcc == V4L2_PIX_FMT_MT21C) {
+    LOG_INFO("Image Processor: needed, %s is an opaque format.", fourcc);
+    // MT21C is a specific opaque MediaTek format and seems, sadly,
+    // undocumented, forcing the use of a specific ImageProcessor, called by
+    // MediaTek Media Data Path (MDP) to produce a "clear" format. This format
+    // was controversial:
+    // https://groups.google.com/g/linux.kernel/c/4nijzmKfdak/m/pWUN7HQBBAAJ
+    mdp_fd = open(kImageProcessorDevice, O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (mdp_fd < 0) {
+      LOG_FATAL("Image Processor: Unable to open dev file: %s.",
+          kImageProcessorDevice);
+    }
+    // MDP claims to support (from v4l2-ctl):
+    //  [0]: 'NM12' (Y/CbCr 4:2:0 (N-C))
+    //  [1]: 'YM12' (Planar YUV 4:2:0 (N-C))
+    //  [2]: 'YV12' (Planar YVU 4:2:0)
+    // Chrome uses V4L2_PIX_FMT_YVU420 (YV12).
+    const uint32_t readable_fourcc = V4L2_PIX_FMT_YVU420 ;
+    const uint32_t readable_fourcc_num_planes = 1;
+    if (capabilities(
+        mdp_fd, uncompressed_fourcc, readable_fourcc) != 0) {
+      LOG_FATAL("Image processor doesn't support the expected formats.");
+    }
+    char mdp_fourcc[FOURCC_SIZE + 1];
+    fourcc_to_string(readable_fourcc, mdp_fourcc);
+    LOG_INFO("Image Processor: OUTPUT format %s --> CAPTURE format: %s",
+        fourcc, mdp_fourcc);
+
+    // |mdp_OUTPUT_queue| takes decoded, opaque frames.
+    mdp_OUTPUT_queue = malloc(sizeof(struct queue));
+    mdp_OUTPUT_queue->v4lfd = mdp_fd;
+    mdp_OUTPUT_queue->type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
+    mdp_OUTPUT_queue->fourcc = uncompressed_fourcc;
+    mdp_OUTPUT_queue->num_planes = 2;
+    mdp_OUTPUT_queue->memory = V4L2_MEMORY_DMABUF;
+    mdp_OUTPUT_queue->processed_frames = 0;
+    mdp_OUTPUT_queue->displayed_frames = 0;
+    int ret = setup_OUTPUT(mdp_OUTPUT_queue, &CAPTURE_queue.coded_width,
+        &CAPTURE_queue.coded_height);
+    if (ret < 0)
+      LOG_FATAL("Image Processor: Unable to configure OUTPUT_queue.");
+
+    // |mdp_CAPTURE_queue| has "clear" and fully mappable and readable frames.
+    mdp_CAPTURE_queue = malloc(sizeof(struct queue));
+    mdp_CAPTURE_queue->v4lfd = mdp_fd;
+    mdp_CAPTURE_queue->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    mdp_CAPTURE_queue->fourcc = readable_fourcc;
+    mdp_CAPTURE_queue->num_planes = readable_fourcc_num_planes;
+    mdp_CAPTURE_queue->memory = V4L2_MEMORY_MMAP;
+    mdp_CAPTURE_queue->display_width = compressed_file.header.width;
+    mdp_CAPTURE_queue->display_height = compressed_file.header.height;
+    mdp_CAPTURE_queue->processed_frames = 0;
+    mdp_CAPTURE_queue->displayed_frames = 0;
+    ret = setup_CAPTURE(gbm, mdp_CAPTURE_queue, DRM_FORMAT_MOD_NONE,
+        /*frame_rate=*/0, /*use_CAPTURE_queue_dimensions=*/ true);
+    if (ret < 0)
+      LOG_FATAL("Image Processor: Unable to configure CAPTURE_queue.");
+
+    // TODO(mcasas): initialize a |process_opaque_frame_fp| and pass it to
+    // decode().
+
+  }
+
   if (!ret) {
     ret = decode(&compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
                  output_file, frames_to_decode, print_md5hash);
@@ -1186,6 +1254,13 @@ int main(int argc, char* argv[]) {
 
   if (write_out)
     fclose(output_file);
+
+  if(mdp_OUTPUT_queue)
+    free(mdp_OUTPUT_queue);
+  if (mdp_CAPTURE_queue)
+    free(mdp_CAPTURE_queue);
+  if (mdp_fd != -1)
+    close(mdp_fd);
 
   cleanup_queue(&OUTPUT_queue);
   cleanup_queue(&CAPTURE_queue);
