@@ -417,7 +417,9 @@ void compute_and_print_md5hash(struct queue* CAPTURE_queue,
 
 // This is the input queue that will take compressed data.
 // 4.5.1.5
-int setup_OUTPUT(struct queue* OUTPUT_queue) {
+int setup_OUTPUT(struct queue* OUTPUT_queue,
+                 const uint32_t* optional_width,
+                 const uint32_t* optional_height) {
   int ret = 0;
 
   // 1. Sets the coded format on OUTPUT via VIDIOC_S_FMT().
@@ -426,13 +428,18 @@ int setup_OUTPUT(struct queue* OUTPUT_queue) {
     memset(&fmt, 0, sizeof(fmt));
 
     fmt.type = OUTPUT_queue->type;
+    if (optional_width)
+      fmt.fmt.pix_mp.width = *optional_width;
+    if (optional_height)
+      fmt.fmt.pix_mp.height = *optional_height;
     fmt.fmt.pix_mp.pixelformat = OUTPUT_queue->fourcc;
-    fmt.fmt.pix_mp.plane_fmt[0].sizeimage = kInputbufferMaxSize;
-    fmt.fmt.pix_mp.num_planes = 1;
+    if (OUTPUT_queue->num_planes == 1)
+      fmt.fmt.pix_mp.plane_fmt[0].sizeimage = kInputbufferMaxSize;
+    fmt.fmt.pix_mp.num_planes = OUTPUT_queue->num_planes;
 
     int ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_S_FMT, &fmt);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_S_FMT failed: %s.", strerror(errno));
+      LOG_ERROR("OUTPUT queue: VIDIOC_S_FMT failed: %s.", strerror(errno));
   }
 
   // 2. Allocates source (bytestream) buffers via VIDIOC_REQBUFS() on OUTPUT.
@@ -445,21 +452,22 @@ int setup_OUTPUT(struct queue* OUTPUT_queue) {
 
     ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_REQBUFS, &reqbuf);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_REQBUFS failed: %s.", strerror(errno));
+      LOG_ERROR("OUTPUT queue: VIDIOC_REQBUFS failed: %s.", strerror(errno));
 
     char fourcc[FOURCC_SIZE + 1];
-    LOG_INFO("%d buffers requested, %d buffers for compressed data (%s) "
-        "returned.", kRequestBufferCount, reqbuf.count,
+    LOG_INFO("OUTPUT queue: %d buffers requested, %d buffers for compressed "
+        "data (%s) returned.", kRequestBufferCount, reqbuf.count,
         fourcc_to_string(OUTPUT_queue->fourcc, fourcc));
 
-    ret = request_mmap_buffers(OUTPUT_queue, &reqbuf);
+    if (OUTPUT_queue->memory == V4L2_MEMORY_MMAP)
+      ret = request_mmap_buffers(OUTPUT_queue, &reqbuf);
   }
 
   // 3. Starts streaming on the OUTPUT queue via VIDIOC_STREAMON().
   if (!ret) {
     ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_STREAMON, &OUTPUT_queue->type);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_STREAMON failed: %s.", strerror(errno));
+      LOG_ERROR("OUTPUT queue: VIDIOC_STREAMON failed: %s.", strerror(errno));
   }
 
   return ret;
@@ -1151,7 +1159,8 @@ int main(int argc, char* argv[]) {
                                .memory = V4L2_MEMORY_MMAP,
                                .processed_frames = 0,
                                .displayed_frames = 0};
-  int ret = setup_OUTPUT(&OUTPUT_queue);
+  int ret = setup_OUTPUT(&OUTPUT_queue, /*optional_width=*/NULL,
+       /*optional_height=*/NULL);
 
   if (!ret)
     ret = prime_OUTPUT(&compressed_file, &OUTPUT_queue, frames_to_decode);
