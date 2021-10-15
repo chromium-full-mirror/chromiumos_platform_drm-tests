@@ -628,19 +628,43 @@ int queue_buffer_CAPTURE(struct queue* queue, uint32_t index) {
 int setup_CAPTURE(struct gbm_device* gbm,
                   struct queue* CAPTURE_queue,
                   uint64_t modifier,
-                  uint32_t coded_frame_rate) {
+                  uint32_t coded_frame_rate,
+                  bool use_CAPTURE_queue_dimensions) {
   int ret = 0;
 
-  // 1. Calls VIDIOC_G_FMT() on the CAPTURE queue to get format for the
-  //    destination buffers parsed/decoded from the bytestream.
+  // In stateful decoders, we insert some encoded chunks in the OUTPUT queue and
+  // then query (via VIDIOC_G_FMT) the associated CAPTURE queue to learn e.g.
+  // the decoded dimensions; this follows the process detailed in [1,2]. For the
+  // Image Processor (MDP) case, we don't want/need to queue frames first,
+  // because we know the dimensions from the decoding proper. So we simply set
+  // the format in the |CAPTURE_queue| first.
+
+  // [1] https://www.kernel.org/doc/html/v5.4/media/uapi/v4l/dev-decoder.html#initialization
+  // [2] https://www.kernel.org/doc/html/v5.4/media/uapi/v4l/dev-decoder.html#capture-setup
+  if (use_CAPTURE_queue_dimensions) {
+    struct v4l2_format fmt;
+    memset(&fmt, 0, sizeof(fmt));
+    fmt.type = CAPTURE_queue->type;
+    fmt.fmt.pix_mp.pixelformat = CAPTURE_queue->fourcc;
+    fmt.fmt.pix_mp.width = CAPTURE_queue->display_width;
+    fmt.fmt.pix_mp.height = CAPTURE_queue->display_height;
+
+    ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_FMT, &fmt);
+    if (ret != 0)
+      LOG_ERROR("CAPTURE queue: VIDIOC_S_FMT failed: %s.", strerror(errno));
+  }
+
+  // 1. "Call VIDIOC_G_FMT() on the CAPTURE queue to get format for the
+  // destination buffers parsed/decoded from the bytestream.""
   if (!ret) {
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));
+
     fmt.type = CAPTURE_queue->type;
 
     int ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_G_FMT, &fmt);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_G_FMT failed: %s.", strerror(errno));
+      LOG_ERROR("CAPTURE queue: VIDIOC_G_FMT failed: %s.", strerror(errno));
 
     // |CAPTURE_queue| might be configured for Q128, in that case we simply
     // ignore it; we'll force |CAPTURE_queue->fourcc| further below.
@@ -671,10 +695,9 @@ int setup_CAPTURE(struct gbm_device* gbm,
       CAPTURE_queue->num_planes);
   }
 
-  // 4. Optional. Sets the CAPTURE format via VIDIOC_S_FMT() on the CAPTURE
-  // queue.
-  //    The client may choose a different format than selected/suggested by the
-  //    decoder in VIDIOC_G_FMT().
+  // 4. "Optional. Set the CAPTURE format via VIDIOC_S_FMT() on the CAPTURE
+  // queue. The client may choose a different format than selected/suggested by
+  // the decoder in VIDIOC_G_FMT()."
   if (!ret) {
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));
@@ -686,7 +709,7 @@ int setup_CAPTURE(struct gbm_device* gbm,
 
     ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_FMT, &fmt);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_S_FMT failed: %s.", strerror(errno));
+      LOG_ERROR("CAPTURE queue: VIDIOC_S_FMT failed: %s.", strerror(errno));
   }
 
   // 5. (Optional) Sets the coded frame interval on the CAPTURE queue via
@@ -707,7 +730,7 @@ int setup_CAPTURE(struct gbm_device* gbm,
 
     ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_PARM, &parms);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_S_PARM failed: %s.", strerror(errno));
+      LOG_ERROR("CAPTURE queue: VIDIOC_S_PARM failed: %s.", strerror(errno));
   }
 
   // 10. Allocates CAPTURE buffers via VIDIOC_REQBUFS() on the CAPTURE queue.
@@ -720,11 +743,11 @@ int setup_CAPTURE(struct gbm_device* gbm,
 
     ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_REQBUFS, &reqbuf);
     if (ret != 0)
-      LOG_ERROR("VIDIOC_REQBUFS failed: %s.", strerror(errno));
+      LOG_ERROR("CAPTURE queue: VIDIOC_REQBUFS failed: %s.", strerror(errno));
 
     char fourcc[FOURCC_SIZE + 1];
-    LOG_INFO("%d buffers requested, %d buffers for decoded data (%s) "
-        "returned.", kRequestBufferCount, reqbuf.count,
+    LOG_INFO("CAPTURE queue: %d buffers requested, %d buffers for decoded data "
+        " (%s) returned.", kRequestBufferCount, reqbuf.count,
         fourcc_to_string(CAPTURE_queue->fourcc, fourcc));
 
     if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF)
@@ -1142,8 +1165,10 @@ int main(int argc, char* argv[]) {
                                 .display_height = compressed_file.header.height,
                                 .processed_frames = 0,
                                 .displayed_frames = 0};
-  if (!ret)
-    ret = setup_CAPTURE(gbm, &CAPTURE_queue, modifier, frame_rate);
+  if (!ret) {
+    ret = setup_CAPTURE(gbm, &CAPTURE_queue, modifier, frame_rate,
+      /*use_CAPTURE_queue_dimensions=*/false);
+  }
 
   if (!ret) {
     ret = decode(&compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
