@@ -788,8 +788,7 @@ int setup_CAPTURE(struct gbm_device* gbm,
 
 void write_file_to_disk(FILE* fp,
                         struct queue* CAPTURE_queue,
-                        uint32_t queue_index,
-                        bool show_frame) {
+                        uint32_t queue_index) {
   if (V4L2_MEMORY_DMABUF == CAPTURE_queue->memory) {
     struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
     int bo_fd = gbm_bo_get_fd(bo);
@@ -839,7 +838,15 @@ int dequeue_buffer(struct queue* queue,
   struct v4l2_plane planes[VIDEO_MAX_PLANES] = {0};
   memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
   v4l2_buffer.type = queue->type;
+  v4l2_buffer.memory = queue->memory;
+    // "Applications call the VIDIOC_DQBUF ioctl to dequeue [...]. They just
+    // set the type, memory and reserved fields of a struct v4l2_buffer as
+    // above, when VIDIOC_DQBUF is called with a pointer to this structure the
+    // driver fills the remaining fields or returns an error code."
+    // https://www.kernel.org/doc/html/v4.19/media/uapi/v4l/vidioc-qbuf.html
+    // Mediatek 8173 however ,needs the |length| field filed in.
   v4l2_buffer.length = queue->num_planes;
+
   v4l2_buffer.m.planes = planes;
   v4l2_buffer.m.planes[0].bytesused = 0;
   int ret = ioctl(queue->v4lfd, VIDIOC_DQBUF, &v4l2_buffer);
@@ -945,14 +952,9 @@ typedef bool (*process_opaque_frame_function)(struct queue*,
                                               struct queue*);
 
 
-// This function gets opaque frames from |CAPTURE_queue| and enqueues them in
-// |mdp_OUTPUT_queue| to be processed by the MDP/Image Processor to
-// produce "clear" frames. "Clear" frames will not be available immediately, a
-// few opaque frames must be enqueued before we see such a frames dequeuable
-// from |mdp_CAPTURE_queue|. Once we can dequeue a "clear" frame from
-// |mdp_CAPTURE_queue|, the opaque frame with the same index is finished being
-// needed in |mdp_OUTPUT_queue| and it can be taken out (dequeued) of that
-// queue to release that slot for later reuse.
+// This function gets a single opaque frame from |CAPTURE_queue| and enqueues it
+// in the |mdp_OUTPUT_queue| to be processed by the MDP/Image Processor; it then
+// waits for it to produce a single "clear" frame in |mdp_CAPTURE_queue|.
 bool process_opaque_frame(struct queue* CAPTURE_queue,
                           uint32_t CAPTURE_queue_index,
                           struct queue* mdp_OUTPUT_queue,
@@ -962,7 +964,129 @@ bool process_opaque_frame(struct queue* CAPTURE_queue,
   assert(CAPTURE_queue->fourcc == mdp_OUTPUT_queue->fourcc);
   assert(mdp_OUTPUT_queue->memory == V4L2_MEMORY_DMABUF);
 
-  // TODO(mcasas): implement body.
+  // Insert the opaque buffer from the |CAPTURE_queue| into the Image Processor
+  // via the |mdp_OUTPUT_queue|. |CAPTURE_queue| and |mdp_OUTPUT_queue| are
+  // supposed to be of type V4L2_MEMORY_MMAP and V4L2_MEMORY_DMABUF, resp. To
+  // avoid a copy, we extract the DmaBufs under |CAPTURE_queue| using
+  // VIDIOC_EXPBUF and "import" them into |mdp_OUTPUT_queue|.
+  {
+    struct v4l2_buffer v4l2_buffer;
+    memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
+
+    // Re-use the CAPTURE_queue index. This is for simplicity in this file:
+    // every time we dequeue an opaque frame from |CAPTURE_queue| we enqueue it
+    // in |mdp_OUTPUT_queue|.
+    v4l2_buffer.index = CAPTURE_queue_index;
+    v4l2_buffer.type = mdp_OUTPUT_queue->type;
+    v4l2_buffer.bytesused = 0; // "unused (set to 0) for multiplanar buffers"
+    v4l2_buffer.flags = V4L2_BUF_FLAG_QUEUED | V4L2_BUF_FLAG_TIMESTAMP_COPY;
+    v4l2_buffer.memory = mdp_OUTPUT_queue->memory;
+    // |length|:"number of elements in the planes array for multi-plane buffers"
+    v4l2_buffer.length = mdp_OUTPUT_queue->num_planes;
+    // Note: although later specs mandated that |v4l2_buffer.timestamp| had to
+    // be filled in, it doesn't seem necessary in older kernels.
+    struct v4l2_plane planes[VIDEO_MAX_PLANES] = { 0 };
+    v4l2_buffer.m.planes = planes;
+
+    for (int i = 0; i < mdp_OUTPUT_queue->num_planes; ++i) {
+      // Export the DmaBuf out of the |CAPTURE_queue| |queue_index| and use it
+      // for |v4l2_buffer|.
+      struct v4l2_exportbuffer expbuf;
+      memset(&expbuf, 0, sizeof(expbuf));
+      expbuf.type = CAPTURE_queue->type;
+      expbuf.index = CAPTURE_queue_index;
+      expbuf.plane = i;
+      const int ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_EXPBUF, &expbuf);
+      if (ret != 0) {
+        LOG_ERROR("Image Processor: mdp_OUTPUT_queue VIDIOC_EXPBUF failed: %s.",
+            strerror(errno));
+        return false;
+      }
+
+      v4l2_buffer.m.planes[i].m.fd = expbuf.fd;
+
+      v4l2_buffer.m.planes[i].length =
+          CAPTURE_queue->buffers[CAPTURE_queue_index].length[i];
+      v4l2_buffer.m.planes[i].bytesused =
+          CAPTURE_queue->buffers[CAPTURE_queue_index].length[i];
+      assert(v4l2_buffer.m.planes[i].data_offset == 0);
+    }
+    const int ret = ioctl(mdp_OUTPUT_queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
+    if (ret != 0) {
+      LOG_ERROR("Image Processor: mdp_OUTPUT_queue VIDIOC_QBUF failed: %s.",
+          strerror(errno));
+      return false;
+    } else {
+      LOG_DEBUG("Image Processor: enqueued frame in mdp_OUTPUT_queue with index"
+          " %d.", CAPTURE_queue_index);
+    }
+  }
+
+  // Try to dequeue a "clear" buffer from |mdp_CAPTURE_queue|. We try as long as
+  // VIDIOC_DQBUF returns EAGAIN, indicating that the device is busy (hopefully
+  // converting our opaque frames). If a buffer is dequeued, we reenqueue it
+  // immediately (note that it won't be reused until a couple of calls later
+  // since the indexes are used in round-robin fashion).
+  {
+    struct v4l2_buffer v4l2_buffer;
+    memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
+    v4l2_buffer.type = mdp_CAPTURE_queue->type;
+    v4l2_buffer.memory = mdp_CAPTURE_queue->memory;
+    struct v4l2_plane planes[VIDEO_MAX_PLANES] = { 0 };
+    v4l2_buffer.m.planes = planes;
+
+    v4l2_buffer.length = mdp_CAPTURE_queue->num_planes;
+
+    int num_tries = INT_MAX;
+    bool keep_trying = false;
+    do {
+      const int ret =
+          ioctl(mdp_CAPTURE_queue->v4lfd, VIDIOC_DQBUF, &v4l2_buffer);
+      if (ret != 0 && errno != EAGAIN) {
+        LOG_ERROR("Image Processor: mdp_CAPTURE_queue VIDIOC_DQBUF failed.");
+        return false;
+      }
+      keep_trying = (ret != 0 && errno == EAGAIN);
+      num_tries--;
+    } while(keep_trying && num_tries != 0);
+
+    if (num_tries == 0) {
+      LOG_ERROR("Image Processor: timed out waiting for a clear frame.");
+      return false;
+    }
+
+    LOG_DEBUG("Image Processor: dequeued frame from mdp_CAPTURE_queue with "
+        "index %d.", v4l2_buffer.index);
+    mdp_CAPTURE_queue->processed_frames++;
+
+    const int ret =
+        ioctl(mdp_CAPTURE_queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
+    if (ret != 0) {
+      LOG_ERROR("Image Processor: mdp_CAPTURE_queue VIDIOC_QBUF failed: %s.",
+          strerror(errno));
+      return false;
+    } else {
+      LOG_DEBUG("Image Processor: (re)enqueued frame in mdp_CAPTURE_queue "
+          "with index %d.", v4l2_buffer.index);
+    }
+  }
+
+  // If we're here, we have dequeued a "clear" buffer from |mdp_CAPTURE_queue|;
+  // dequeue a buffer from |mdp_OUTPUT_queue|: the MDP has finished processing
+  // one and we can reuse that slot in future function calls.
+  {
+    uint32_t index = 0;
+    const int ret = dequeue_buffer(mdp_OUTPUT_queue, &index, /*bytesused=*/NULL,
+                                   /*flags=*/NULL, /*show_frame=*/NULL);
+    if (ret != 0) {
+      LOG_ERROR("Image Processor: mdp_OUTPUT_queue VIDIOC_DQBUF failed: %s.",
+          strerror(errno));
+      return false;
+    } else {
+      LOG_DEBUG("Image Processor: (re)dequeued frame in mdp_OUTPUT_queue with "
+          "index %d.", index);
+    }
+  }
 
   return true;
 }
@@ -1003,14 +1127,14 @@ int decode(struct compressed_file* file,
         if (process_opaque_frame_fp) {
           assert(V4L2_MEMORY_MMAP == CAPTURE_queue->memory);
           if (!process_opaque_frame_fp(CAPTURE_queue, index, mdp_OUTPUT_queue,
-                                  mdp_CAPTURE_queue)){
+                                       mdp_CAPTURE_queue)){
             LOG_ERROR("Image Processor failed.");
             return -1;
           }
+        } else {
+          if (output_file)
+            write_file_to_disk(output_file, CAPTURE_queue, index);
         }
-
-        if (output_file)
-          write_file_to_disk(output_file, CAPTURE_queue, index, show_frame);
 
         if (print_md5hash)
           compute_and_print_md5hash(CAPTURE_queue, index);
