@@ -939,13 +939,44 @@ int drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
   return ret;
 }
 
+typedef bool (*process_opaque_frame_function)(struct queue*,
+                                              uint32_t,
+                                              struct queue*,
+                                              struct queue*);
+
+
+// This function gets opaque frames from |CAPTURE_queue| and enqueues them in
+// |mdp_OUTPUT_queue| to be processed by the MDP/Image Processor to
+// produce "clear" frames. "Clear" frames will not be available immediately, a
+// few opaque frames must be enqueued before we see such a frames dequeuable
+// from |mdp_CAPTURE_queue|. Once we can dequeue a "clear" frame from
+// |mdp_CAPTURE_queue|, the opaque frame with the same index is finished being
+// needed in |mdp_OUTPUT_queue| and it can be taken out (dequeued) of that
+// queue to release that slot for later reuse.
+bool process_opaque_frame(struct queue* CAPTURE_queue,
+                          uint32_t CAPTURE_queue_index,
+                          struct queue* mdp_OUTPUT_queue,
+                          struct queue* mdp_CAPTURE_queue)
+{
+  assert(CAPTURE_queue->memory == V4L2_MEMORY_MMAP);
+  assert(CAPTURE_queue->fourcc == mdp_OUTPUT_queue->fourcc);
+  assert(mdp_OUTPUT_queue->memory == V4L2_MEMORY_DMABUF);
+
+  // TODO(mcasas): implement body.
+
+  return true;
+}
+
 int decode(struct compressed_file* file,
            struct queue* CAPTURE_queue,
            struct queue* OUTPUT_queue,
            uint64_t modifier,
            FILE* output_file,
            uint32_t frames_to_decode,
-           bool print_md5hash) {
+           bool print_md5hash,
+           process_opaque_frame_function process_opaque_frame_fp,
+           struct queue* mdp_OUTPUT_queue,
+           struct queue* mdp_CAPTURE_queue) {
   int ret = 0;
 
   while (CAPTURE_queue->processed_frames < OUTPUT_queue->processed_frames) {
@@ -968,6 +999,15 @@ int decode(struct compressed_file* file,
       CAPTURE_queue->processed_frames++;
       if (show_frame) {
         CAPTURE_queue->displayed_frames++;
+
+        if (process_opaque_frame_fp) {
+          assert(V4L2_MEMORY_MMAP == CAPTURE_queue->memory);
+          if (!process_opaque_frame_fp(CAPTURE_queue, index, mdp_OUTPUT_queue,
+                                  mdp_CAPTURE_queue)){
+            LOG_ERROR("Image Processor failed.");
+            return -1;
+          }
+        }
 
         if (output_file)
           write_file_to_disk(output_file, CAPTURE_queue, index, show_frame);
@@ -1181,6 +1221,7 @@ int main(int argc, char* argv[]) {
       /*use_CAPTURE_queue_dimensions=*/false);
   }
 
+  process_opaque_frame_function process_opaque_frame_fp = NULL;
   int mdp_fd = -1;
   struct queue* mdp_OUTPUT_queue = NULL;
   struct queue* mdp_CAPTURE_queue = NULL;
@@ -1242,14 +1283,13 @@ int main(int argc, char* argv[]) {
     if (ret < 0)
       LOG_FATAL("Image Processor: Unable to configure CAPTURE_queue.");
 
-    // TODO(mcasas): initialize a |process_opaque_frame_fp| and pass it to
-    // decode().
-
+    process_opaque_frame_fp = &process_opaque_frame;
   }
 
   if (!ret) {
     ret = decode(&compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
-                 output_file, frames_to_decode, print_md5hash);
+        output_file, frames_to_decode, print_md5hash, process_opaque_frame_fp,
+        mdp_OUTPUT_queue, mdp_CAPTURE_queue);
   }
 
   if (write_out)
