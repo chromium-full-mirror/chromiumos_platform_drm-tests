@@ -71,6 +71,7 @@ static const uint32_t kIVFHeaderSignature = v4l2_fourcc('D', 'K', 'I', 'F');
 static const uint32_t kInvalidFrameRate = 0;
 
 static const char* kImageProcessorDevice = "/dev/image-proc0";
+static const int kInvalidBufferIndex = -1;
 
 static int log_run_level = DEFAULT_LOG_LEVEL;
 
@@ -786,7 +787,7 @@ int setup_CAPTURE(struct gbm_device* gbm,
   return ret;
 }
 
-void write_file_to_disk(FILE* fp,
+void write_frame_to_disk(FILE* fp,
                         struct queue* CAPTURE_queue,
                         uint32_t queue_index) {
   if (V4L2_MEMORY_DMABUF == CAPTURE_queue->memory) {
@@ -811,19 +812,24 @@ void write_file_to_disk(FILE* fp,
 
     close(bo_fd);
   } else {
+    const size_t num_coded_pixels = CAPTURE_queue->coded_width *
+                                    CAPTURE_queue->coded_height;
     if (CAPTURE_queue->num_planes == 1) {
-      size_t buffer_size =
-          (3 * CAPTURE_queue->coded_width * CAPTURE_queue->coded_height) >> 1;
+      const size_t buffer_size = (3 * num_coded_pixels) >> 1;
       uint8_t* buffer = CAPTURE_queue->buffers[queue_index].start[0];
 
       fwrite(buffer, buffer_size, 1, fp);
-    } else {
-      for (uint32_t i = 0; i < CAPTURE_queue->num_planes; ++i) {
-        size_t buffer_size =
-            (CAPTURE_queue->coded_width * CAPTURE_queue->coded_height) >> i;
-        uint8_t* buffer = CAPTURE_queue->buffers[queue_index].start[i];
+    } else  {
+      assert(CAPTURE_queue->num_planes == 2 || CAPTURE_queue->num_planes == 3);
 
-        fwrite(buffer, buffer_size, 1, fp);
+      uint8_t* y_buffer = CAPTURE_queue->buffers[queue_index].start[0];
+      fwrite(y_buffer, num_coded_pixels, 1, fp);
+
+      const int chroma_plane_scale = 1 << (CAPTURE_queue->num_planes - 1);
+      for (uint32_t i = 1; i < CAPTURE_queue->num_planes; ++i) {
+        const size_t plane_size = num_coded_pixels / chroma_plane_scale;
+        uint8_t* chroma_buffer = CAPTURE_queue->buffers[queue_index].start[i];
+        fwrite(chroma_buffer, plane_size, 1, fp);
       }
     }
   }
@@ -949,7 +955,8 @@ int drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
 typedef bool (*process_opaque_frame_function)(struct queue*,
                                               uint32_t,
                                               struct queue*,
-                                              struct queue*);
+                                              struct queue*,
+                                              int*);
 
 
 // This function gets a single opaque frame from |CAPTURE_queue| and enqueues it
@@ -958,7 +965,8 @@ typedef bool (*process_opaque_frame_function)(struct queue*,
 bool process_opaque_frame(struct queue* CAPTURE_queue,
                           uint32_t CAPTURE_queue_index,
                           struct queue* mdp_OUTPUT_queue,
-                          struct queue* mdp_CAPTURE_queue)
+                          struct queue* mdp_CAPTURE_queue,
+                          int* mdp_CAPTURE_queue_dequeued_buffer_index)
 {
   assert(CAPTURE_queue->memory == V4L2_MEMORY_MMAP);
   assert(CAPTURE_queue->fourcc == mdp_OUTPUT_queue->fourcc);
@@ -1058,6 +1066,7 @@ bool process_opaque_frame(struct queue* CAPTURE_queue,
     LOG_DEBUG("Image Processor: dequeued frame from mdp_CAPTURE_queue with "
         "index %d.", v4l2_buffer.index);
     mdp_CAPTURE_queue->processed_frames++;
+    *mdp_CAPTURE_queue_dequeued_buffer_index = v4l2_buffer.index;
 
     const int ret =
         ioctl(mdp_CAPTURE_queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
@@ -1125,15 +1134,25 @@ int decode(struct compressed_file* file,
         CAPTURE_queue->displayed_frames++;
 
         if (process_opaque_frame_fp) {
+          int mdp_CAPTURE_queue_buffer_index = kInvalidBufferIndex;
           assert(V4L2_MEMORY_MMAP == CAPTURE_queue->memory);
-          if (!process_opaque_frame_fp(CAPTURE_queue, index, mdp_OUTPUT_queue,
-                                       mdp_CAPTURE_queue)){
+          if (!process_opaque_frame_fp(CAPTURE_queue,
+                                       index,
+                                       mdp_OUTPUT_queue,
+                                       mdp_CAPTURE_queue,
+                                       &mdp_CAPTURE_queue_buffer_index)){
             LOG_ERROR("Image Processor failed.");
             return -1;
           }
+          if (output_file &&
+              mdp_CAPTURE_queue_buffer_index != kInvalidBufferIndex) {
+            write_frame_to_disk(output_file, mdp_CAPTURE_queue,
+                                mdp_CAPTURE_queue_buffer_index);
+          }
+
         } else {
           if (output_file)
-            write_file_to_disk(output_file, CAPTURE_queue, index);
+            write_frame_to_disk(output_file, CAPTURE_queue, index);
         }
 
         if (print_md5hash)
@@ -1366,8 +1385,8 @@ int main(int argc, char* argv[]) {
     //  [1]: 'YM12' (Planar YUV 4:2:0 (N-C))
     //  [2]: 'YV12' (Planar YVU 4:2:0)
     // Chrome uses V4L2_PIX_FMT_YVU420 (YV12).
-    const uint32_t readable_fourcc = V4L2_PIX_FMT_YVU420 ;
-    const uint32_t readable_fourcc_num_planes = 1;
+    const uint32_t readable_fourcc = V4L2_PIX_FMT_YUV420M ;
+    const uint32_t readable_fourcc_num_planes = 3;
     if (capabilities(
         mdp_fd, uncompressed_fourcc, readable_fourcc) != 0) {
       LOG_FATAL("Image processor doesn't support the expected formats.");
