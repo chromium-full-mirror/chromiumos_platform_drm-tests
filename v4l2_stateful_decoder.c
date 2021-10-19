@@ -90,10 +90,11 @@ struct queue {
   enum v4l2_buf_type type;
   uint32_t fourcc;
   struct mmap_buffers* buffers;
-  // |display_width| x |display_height|:
-  // The size of the image on the screen.
-  uint32_t display_width;
-  uint32_t display_height;
+  // |display_area| describes the bounds of the displayable image relative to
+  // the image buffer. |left| and |top| are the offset from the top left corner
+  // in pixels. |width| and |height| describe the displayable image's width and
+  // height in pixels.
+  struct v4l2_rect display_area;
   // |coded_width| x |coded_height|:
   // The size of the encoded frame.
   // Usually has an alignment of 16, 32 depending on codec.
@@ -334,41 +335,47 @@ int request_dmabuf_buffers(struct gbm_device* gbm,
 // NV12 to I420 conversion.
 // This function converts the NV12 |buffer_in| into an I420 |buffer_out|.
 // |buffer_in| is padded, whereas |buffer_out| is tightly packed.
-// Example: |display_width| = 8, |display_height| = 2, |buffer_width| = 10.
+// Example: |display_area.left| = 0, |display_area.top| = 0,
+// |display_area.width| = 8, |display_area.height| = 2, |buffer_width| = 10.
 //
 // NV12           I420
 // YYYYYYYY00     YYYYYYYY
 // YYYYYYYY00     YYYYYYYY
 // UVUVUVUV00     UUUUVVVV
 //
-// HW pads 0s for |buffer_width - display_width| bytes after each row on
-// Trogdor. But other platforms might leave the padding uninitialized, and in
-// yet others accessing it might causes a crash of some sort (access violation).
-void nv12_to_i420(uint32_t display_width,
-                  uint32_t display_height,
+// HW pads 0s for |buffer_width - display_area.left - display_area.width|
+// bytes after each row on Trogdor. But other platforms might leave the padding
+// uninitialized, and in yet others accessing it might causes a crash of some
+// sort (access violation).
+void nv12_to_i420(struct v4l2_rect display_area,
                   uint32_t buffer_width,
                   uint32_t buffer_height,
                   uint8_t* buffer_in,
                   uint8_t* buffer_out) {
   // Copies luma data from |buffer_in| one row at a time
   // to avoid touching the padding.
-  for (int row = 0; row < display_height; ++row)
-    memcpy(buffer_out + row * display_width, buffer_in + row * buffer_width,
-           display_width);
+  for (int row = 0; row < display_area.height; ++row) {
+    memcpy(buffer_out + row * display_area.width,
+           buffer_in + display_area.left +
+             (display_area.top + row) * buffer_width,
+           display_area.width);
+  }
 
-  const size_t y_plane_size = display_width * display_height;
+  const size_t y_plane_size = display_area.width * display_area.height;
   const size_t u_plane_size = y_plane_size / 4;
   uint8_t* u_plane_out = &buffer_out[y_plane_size];
   uint8_t* v_plane_out = u_plane_out + u_plane_size;
   const size_t uv_plane_offset = buffer_width * buffer_height;
 
-  for (int row = 0; row < display_height / 2; ++row) {
-    for (int column = 0; column < display_width / 2; ++column) {
-      *(u_plane_out + row * display_width / 2 + column) =
-          buffer_in[uv_plane_offset + row * buffer_width + 2 * column];
+  for (int row = 0; row < display_area.height / 2; ++row) {
+    for (int column = 0; column < display_area.width / 2; ++column) {
+      *(u_plane_out + row * display_area.width / 2 + column) =
+          buffer_in[uv_plane_offset + (display_area.top + row) * buffer_width +
+          2 * (display_area.left + column)];
 
-      *(v_plane_out + row * display_width / 2 + column) =
-          buffer_in[uv_plane_offset + row * buffer_width + 2 * column + 1];
+      *(v_plane_out + row * display_area.width / 2 + column) =
+          buffer_in[uv_plane_offset + (display_area.top + row) * buffer_width +
+          2 * (display_area.left + column) + 1];
     }
   }
 }
@@ -410,8 +417,9 @@ void map_buffers_and_calculate_md5hash(struct queue* CAPTURE_queue,
 
   // Libvpx golden md5 hashes are calculated in I420 format.
   // Uses |buffer_i420| to deinterleave |buffer_nv12| for this purpose.
-  const uint32_t display_width = CAPTURE_queue->display_width;
-  const uint32_t display_height = CAPTURE_queue->display_height;
+  const uint32_t display_width = CAPTURE_queue->display_area.width;
+  const uint32_t display_height = CAPTURE_queue->display_area.height;
+
   // buffer w x h :
   // The size of the buffer that the frame will be stored in.
   // Usually the driver has limitations on alignment depending on HW.
@@ -427,7 +435,7 @@ void map_buffers_and_calculate_md5hash(struct queue* CAPTURE_queue,
   assert(buffer_i420);
   memset(buffer_i420, 0, sizeof(size_t) * buffer_i420_size_in_bytes);
 
-  nv12_to_i420(display_width, display_height, buffer_width, buffer_height,
+  nv12_to_i420(CAPTURE_queue->display_area, buffer_width, buffer_height,
                buffer_nv12, buffer_i420);
 
   compute_and_print_md5hash(buffer_i420, buffer_i420_size_in_bytes,
@@ -676,8 +684,8 @@ int setup_CAPTURE(struct gbm_device* gbm,
     memset(&fmt, 0, sizeof(fmt));
     fmt.type = CAPTURE_queue->type;
     fmt.fmt.pix_mp.pixelformat = CAPTURE_queue->fourcc;
-    fmt.fmt.pix_mp.width = CAPTURE_queue->display_width;
-    fmt.fmt.pix_mp.height = CAPTURE_queue->display_height;
+    fmt.fmt.pix_mp.width = CAPTURE_queue->display_area.width;
+    fmt.fmt.pix_mp.height = CAPTURE_queue->display_area.height;
 
     ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_FMT, &fmt);
     if (ret != 0)
@@ -724,6 +732,36 @@ int setup_CAPTURE(struct gbm_device* gbm,
       fourcc_to_string(CAPTURE_queue->fourcc, fourcc),
       CAPTURE_queue->num_planes);
   }
+
+  // 2. Optional. Acquire the visible resolution via VIDIOC_G_SELECTION.
+  if (!ret) {
+    struct v4l2_selection selection;
+    memset(&selection, 0, sizeof(selection));
+    selection.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    selection.target = V4L2_SEL_TGT_COMPOSE;
+
+    ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_G_SELECTION, &selection);
+    if (ret != 0)
+      LOG_ERROR("VIDIOC_G_SELECTION failed: %s.", strerror(errno));
+
+    if (CAPTURE_queue->display_area.left != selection.r.left ||
+        CAPTURE_queue->display_area.top != selection.r.top ||
+        CAPTURE_queue->display_area.width != selection.r.width ||
+        CAPTURE_queue->display_area.height != selection.r.height) {
+      LOG_DEBUG("CAPTURE queue visible area changed from %dx%d+%d+%d to "
+        "%dx%d+%d+%d",
+        CAPTURE_queue->display_area.width, CAPTURE_queue->display_area.height,
+        CAPTURE_queue->display_area.left, CAPTURE_queue->display_area.top,
+        selection.r.width , selection.r.height,
+        selection.r.left , selection.r.top);
+    }
+    CAPTURE_queue->display_area = selection.r;
+
+    LOG_INFO("DisplayLeft=%d, DisplayTop=%d, DisplayWidth=%d, DisplayHeight=%d",
+              selection.r.left, selection.r.top,
+              selection.r.width, selection.r.height);
+  }
+
 
   // 4. "Optional. Set the CAPTURE format via VIDIOC_S_FMT() on the CAPTURE
   // queue. The client may choose a different format than selected/suggested by
@@ -1387,8 +1425,10 @@ int main(int argc, char* argv[]) {
                                 .fourcc = uncompressed_fourcc,
                                 .num_planes = 1,
                                 .memory = CAPTURE_memory,
-                                .display_width = compressed_file.header.width,
-                                .display_height = compressed_file.header.height,
+                                .display_area = {.left = 0,
+                                  .top = 0,
+                                  .width = compressed_file.header.width,
+                                  .height = compressed_file.header.height},
                                 .processed_frames = 0,
                                 .displayed_frames = 0};
   if (!ret) {
@@ -1455,8 +1495,10 @@ int main(int argc, char* argv[]) {
     mdp_CAPTURE_queue->fourcc = readable_fourcc;
     mdp_CAPTURE_queue->num_planes = readable_fourcc_num_planes;
     mdp_CAPTURE_queue->memory = V4L2_MEMORY_MMAP;
-    mdp_CAPTURE_queue->display_width = compressed_file.header.width;
-    mdp_CAPTURE_queue->display_height = compressed_file.header.height;
+    mdp_CAPTURE_queue->display_area.left = 0;
+    mdp_CAPTURE_queue->display_area.top = 0;
+    mdp_CAPTURE_queue->display_area.width = compressed_file.header.width;
+    mdp_CAPTURE_queue->display_area.height = compressed_file.header.height;
     mdp_CAPTURE_queue->processed_frames = 0;
     mdp_CAPTURE_queue->displayed_frames = 0;
     ret = setup_CAPTURE(gbm, mdp_CAPTURE_queue, DRM_FORMAT_MOD_NONE,
