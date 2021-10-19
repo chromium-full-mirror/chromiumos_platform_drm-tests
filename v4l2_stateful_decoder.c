@@ -692,7 +692,7 @@ int setup_CAPTURE(struct gbm_device* gbm,
 
     fmt.type = CAPTURE_queue->type;
 
-    int ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_G_FMT, &fmt);
+    ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_G_FMT, &fmt);
     if (ret != 0)
       LOG_ERROR("CAPTURE queue: VIDIOC_G_FMT failed: %s.", strerror(errno));
 
