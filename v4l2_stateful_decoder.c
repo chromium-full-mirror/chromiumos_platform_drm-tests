@@ -138,6 +138,11 @@ struct md5_hash {
   uint8_t bytes[16];
 };
 
+struct data_buffer {
+  uint8_t* data;
+  size_t size;
+};
+
 bool is_vp9(uint32_t fourcc) {
   // VP9 FourCC should match VP9X where 'X' is the version number. This check
   // ignores the last character, so VP90, VP91, etc. match.
@@ -176,11 +181,6 @@ struct compressed_file open_file(const char* file_name) {
         fourcc_to_string(file.header.fourcc, fourcc));
 
     LOG_INFO("Ivf file header: %d x %d", file.header.width, file.header.height);
-    // |width| and |height| should be even numbers.
-    // This is because nv12 to i420 conversion (needed for md5hash computation)
-    // assumes |width| and |height| to be even numbers.
-    assert((file.header.width % 2) == 0);
-    assert((file.header.height % 2) == 0);
     LOG_INFO("Ivf file header: frame_cnt = %d", file.header.frame_cnt);
   } else {
     LOG_ERROR("Unable to open file: %s.", file_name);
@@ -333,8 +333,10 @@ int request_dmabuf_buffers(struct gbm_device* gbm,
 }
 
 // NV12 to I420 conversion.
-// This function converts the NV12 |buffer_in| into an I420 |buffer_out|.
-// |buffer_in| is padded, whereas |buffer_out| is tightly packed.
+// This function converts the NV12 |buffer_in| into an I420 buffers stored in a
+// struct data_buffer. Ownership of the return structure's |.data| member is
+// transferred to the caller. It must be freed elsewhere.
+// |buffer_in| is padded, whereas the return buffer is tightly packed.
 // Example: |display_area.left| = 0, |display_area.top| = 0,
 // |display_area.width| = 8, |display_area.height| = 2, |buffer_width| = 10.
 //
@@ -347,37 +349,52 @@ int request_dmabuf_buffers(struct gbm_device* gbm,
 // bytes after each row on Trogdor. But other platforms might leave the padding
 // uninitialized, and in yet others accessing it might causes a crash of some
 // sort (access violation).
-void nv12_to_i420(struct v4l2_rect display_area,
-                  uint32_t buffer_width,
-                  uint32_t buffer_height,
-                  uint8_t* buffer_in,
-                  uint8_t* buffer_out) {
+struct data_buffer nv12_to_i420(struct v4l2_rect display_area,
+                                uint32_t buffer_width,
+                                uint32_t buffer_height,
+                                uint8_t* buffer_in) {
+
+  const size_t y_plane_size = display_area.width * display_area.height;
+
+  // Both NV12 and I420 are 4:2:0, so the U and V planes are downsampled by a
+  // factor of two in width and height respective to the Y plane.
+  // When an image dimension is odd, round the downsampled dimension up.
+  const size_t u_plane_width = (display_area.width + 1) / 2;
+  const size_t u_plane_height = (display_area.height + 1) / 2;
+  const size_t u_plane_size = u_plane_width * u_plane_height;
+
+  struct data_buffer buffer_out = {.data = NULL,
+                                   .size = y_plane_size + 2 * u_plane_size};
+  buffer_out.data = malloc(sizeof(uint8_t) * buffer_out.size);
+  assert(buffer_out.data);
+  memset(buffer_out.data, 0, sizeof(uint8_t) * buffer_out.size);
+
   // Copies luma data from |buffer_in| one row at a time
   // to avoid touching the padding.
   for (int row = 0; row < display_area.height; ++row) {
-    memcpy(buffer_out + row * display_area.width,
+    memcpy(buffer_out.data + row * display_area.width,
            buffer_in + display_area.left +
              (display_area.top + row) * buffer_width,
            display_area.width);
   }
 
-  const size_t y_plane_size = display_area.width * display_area.height;
-  const size_t u_plane_size = y_plane_size / 4;
-  uint8_t* u_plane_out = &buffer_out[y_plane_size];
+  uint8_t* u_plane_out = &buffer_out.data[y_plane_size];
   uint8_t* v_plane_out = u_plane_out + u_plane_size;
   const size_t uv_plane_offset = buffer_width * buffer_height;
 
-  for (int row = 0; row < display_area.height / 2; ++row) {
-    for (int column = 0; column < display_area.width / 2; ++column) {
-      *(u_plane_out + row * display_area.width / 2 + column) =
+  for (int row = 0; row < u_plane_height; ++row) {
+    for (int column = 0; column < u_plane_width; ++column) {
+      *(u_plane_out + row * u_plane_width + column) =
           buffer_in[uv_plane_offset + (display_area.top + row) * buffer_width +
           2 * (display_area.left + column)];
 
-      *(v_plane_out + row * display_area.width / 2 + column) =
+      *(v_plane_out + row * u_plane_width + column) =
           buffer_in[uv_plane_offset + (display_area.top + row) * buffer_width +
           2 * (display_area.left + column) + 1];
     }
   }
+
+  return buffer_out;
 }
 
 void compute_and_print_md5hash(const void *data,
@@ -415,11 +432,6 @@ void map_buffers_and_calculate_md5hash(struct queue* CAPTURE_queue,
 
   uint8_t* buffer_nv12 = mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
 
-  // Libvpx golden md5 hashes are calculated in I420 format.
-  // Uses |buffer_i420| to deinterleave |buffer_nv12| for this purpose.
-  const uint32_t display_width = CAPTURE_queue->display_area.width;
-  const uint32_t display_height = CAPTURE_queue->display_area.height;
-
   // buffer w x h :
   // The size of the buffer that the frame will be stored in.
   // Usually the driver has limitations on alignment depending on HW.
@@ -428,20 +440,15 @@ void map_buffers_and_calculate_md5hash(struct queue* CAPTURE_queue,
 
   assert(buffer_width * buffer_height <= buffer_size);
 
-  const uint32_t buffer_i420_size_in_bytes =
-      (display_width * display_height * 3) / 2;
+  struct data_buffer buffer_i420 = nv12_to_i420(CAPTURE_queue->display_area,
+                                                buffer_width,
+                                                buffer_height,
+                                                buffer_nv12);
 
-  uint8_t* buffer_i420 = malloc(sizeof(size_t) * buffer_i420_size_in_bytes);
-  assert(buffer_i420);
-  memset(buffer_i420, 0, sizeof(size_t) * buffer_i420_size_in_bytes);
-
-  nv12_to_i420(CAPTURE_queue->display_area, buffer_width, buffer_height,
-               buffer_nv12, buffer_i420);
-
-  compute_and_print_md5hash(buffer_i420, buffer_i420_size_in_bytes,
+  compute_and_print_md5hash(buffer_i420.data, buffer_i420.size,
                             CAPTURE_queue->displayed_frames);
 
-  free(buffer_i420);
+  free(buffer_i420.data);
   munmap(buffer_nv12, buffer_size);
 }
 
