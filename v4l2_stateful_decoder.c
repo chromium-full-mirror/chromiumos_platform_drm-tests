@@ -100,6 +100,10 @@ struct queue {
   // Usually has an alignment of 16, 32 depending on codec.
   uint32_t coded_width;
   uint32_t coded_height;
+  // Contains the number of bytes in every row of video (line_stride) in each
+  // plane of an MMAP buffer. Copied from the V4L2 multi-planar format
+  // structure.
+  uint32_t bytes_per_line[VIDEO_MAX_PLANES];
   uint32_t cnt;
   uint32_t num_planes;
   enum v4l2_memory memory;  // V4L2_MEMORY_(MMAP|DMABUF) etc.
@@ -417,39 +421,57 @@ void compute_and_print_md5hash(const void *data,
 // Maps |CAPTURE_queue|s buffer at |queue_index| and calculates its md5 sum.
 void map_buffers_and_calculate_md5hash(struct queue* CAPTURE_queue,
                                        uint32_t queue_index) {
-  // TODO: needs to handle V4L2_MEMORY_MMAP case
-  assert(CAPTURE_queue->memory == V4L2_MEMORY_DMABUF);
+  assert(CAPTURE_queue->memory == V4L2_MEMORY_DMABUF ||
+         CAPTURE_queue->memory == V4L2_MEMORY_MMAP);
   // TODO: only handles 8 bit pixels
   assert(CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12);
 
-  struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
-  int bo_fd = gbm_bo_get_fd(bo);
-  size_t buffer_size = lseek(bo_fd, 0, SEEK_END);
-  lseek(bo_fd, 0, SEEK_SET);
+  // Maps the frame buffer into |buffer_nv12| and get the buffer's stride and
+  // size metadata for cropping and deinterleaving the image.
+  uint32_t buffer_bytes_per_line = 0;
+  uint32_t buffer_height = 0;
+  size_t buffer_size = 0;
+  uint8_t* buffer_nv12 = NULL;
 
-  assert(gbm_bo_get_stride_for_plane(bo, 0) ==
-         gbm_bo_get_stride_for_plane(bo, 1));
+  if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
+    struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
+    int bo_fd = gbm_bo_get_fd(bo);
+    buffer_size = lseek(bo_fd, 0, SEEK_END);
+    lseek(bo_fd, 0, SEEK_SET);
 
-  uint8_t* buffer_nv12 = mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
+    assert(gbm_bo_get_stride_for_plane(bo, 0) ==
+           gbm_bo_get_stride_for_plane(bo, 1));
 
-  // buffer w x h :
-  // The size of the buffer that the frame will be stored in.
-  // Usually the driver has limitations on alignment depending on HW.
-  const uint32_t buffer_width = gbm_bo_get_stride_for_plane(bo, 0);
-  const uint32_t buffer_height = gbm_bo_get_height(bo);
+    buffer_bytes_per_line = gbm_bo_get_stride_for_plane(bo, 0);
+    buffer_height = gbm_bo_get_height(bo);
 
-  assert(buffer_width * buffer_height <= buffer_size);
+    buffer_nv12 = mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
+  } else {
+    assert(CAPTURE_queue->memory == V4L2_MEMORY_MMAP);
+    // TODO(nhebert) doesn't support multi-planar MMAP buffers
+    assert(CAPTURE_queue->num_planes == 1);
+
+    buffer_bytes_per_line = CAPTURE_queue->bytes_per_line[0];
+    buffer_height = CAPTURE_queue->coded_height;
+
+    buffer_size = CAPTURE_queue->buffers[queue_index].length[0];
+    buffer_nv12 = CAPTURE_queue->buffers[queue_index].start[0];
+  }
+
+  assert(buffer_bytes_per_line * buffer_height  * 3 / 2 <= buffer_size);
 
   struct data_buffer buffer_i420 = nv12_to_i420(CAPTURE_queue->display_area,
-                                                buffer_width,
+                                                buffer_bytes_per_line,
                                                 buffer_height,
                                                 buffer_nv12);
+
+  if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF)
+    munmap(buffer_nv12, buffer_size);
 
   compute_and_print_md5hash(buffer_i420.data, buffer_i420.size,
                             CAPTURE_queue->displayed_frames);
 
   free(buffer_i420.data);
-  munmap(buffer_nv12, buffer_size);
 }
 
 // This is the input queue that will take compressed data.
@@ -732,6 +754,11 @@ int setup_CAPTURE(struct gbm_device* gbm,
         CAPTURE_queue->num_planes, fmt.fmt.pix_mp.num_planes);
     }
     CAPTURE_queue->num_planes = fmt.fmt.pix_mp.num_planes;
+
+    for (int i = 0; i < CAPTURE_queue->num_planes; ++i) {
+      CAPTURE_queue->bytes_per_line[i] =
+        fmt.fmt.pix_mp.plane_fmt[i].bytesperline;
+    }
 
     char fourcc[FOURCC_SIZE + 1];
     LOG_INFO("CAPTURE queue: width=%d, height=%d, format=%s, num_planes=%d",
