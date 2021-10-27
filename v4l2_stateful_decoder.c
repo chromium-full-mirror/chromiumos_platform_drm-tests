@@ -107,12 +107,12 @@ struct queue {
   uint32_t cnt;
   uint32_t num_planes;
   enum v4l2_memory memory;  // V4L2_MEMORY_(MMAP|DMABUF) etc.
-  uint32_t processed_frames;
-  uint32_t displayed_frames;
-  // Set to true when a frame is recieved with V4L2_BUF_FLAG_LAST set. This
-  // happens when a decoder returns the last frame from its stream. Any
-  // subsequent attempts to dequeue will fail with EPIPE.
-  bool buf_last_flag_has_been_set;
+  uint32_t displayed_frames; // Not valid for OUTPUT queues.
+  // Used to track the state of OUTPUT and CAPTURE queues. The CAPTURE queue
+  // stops streaming when it dequeues a buffer with V4L2_BUF_FLAG_LAST set.
+  // The OUTPUT queue should stop streaming when there are no remaining
+  // compressed frames to enqueue to it.
+  bool is_streaming;
 };
 
 struct ivf_file_header {
@@ -135,6 +135,7 @@ struct ivf_frame_header {
 
 struct compressed_file {
   FILE* fp;
+  bool is_at_end_of_file;
   struct ivf_file_header header;
 };
 
@@ -163,7 +164,7 @@ char* fourcc_to_string(uint32_t fourcc, char* fourcc_string) {
 }
 
 struct compressed_file open_file(const char* file_name) {
-  struct compressed_file file = {0};
+  struct compressed_file file = {};
 
   FILE* fp = fopen(file_name, "rb");
   if (fp) {
@@ -541,25 +542,19 @@ int setup_OUTPUT(struct queue* OUTPUT_queue,
     ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_STREAMON, &OUTPUT_queue->type);
     if (ret != 0)
       LOG_ERROR("OUTPUT queue: VIDIOC_STREAMON failed: %s.", strerror(errno));
+    else
+      OUTPUT_queue->is_streaming = true;
   }
 
   return ret;
 }
 
+// Reads a frame from |file| and submits it to |OUTPUT_queue|.
 int submit_compressed_frame(struct compressed_file* file,
                             struct queue* OUTPUT_queue,
-                            uint32_t queue_index,
-                            uint32_t frames_to_decode) {
+                            uint32_t queue_index) {
   const uint32_t num = file->header.numerator;
   const uint32_t den = file->header.denominator;
-
-  if (OUTPUT_queue->displayed_frames >= frames_to_decode) {
-    LOG_INFO(
-        "Already prepared requested number of frames |frames_to_decode|"
-        "from OUTPUT_queue.");
-
-    return 0;
-  }
 
   struct ivf_frame_header frame_header = {0};
 
@@ -569,6 +564,7 @@ int submit_compressed_frame(struct compressed_file* file,
       return -1;
     } else {
       LOG_INFO("Unable to read ivf frame header, reached the end of ivf file.");
+      file->is_at_end_of_file = true;
       return 0;
     }
   }
@@ -578,25 +574,6 @@ int submit_compressed_frame(struct compressed_file* file,
             file->fp) != frame_header.size) {
     LOG_ERROR("Unable to read ivf frame data.");
     return -1;
-  }
-
-  OUTPUT_queue->processed_frames++;
-
-  if (is_vp9(file->header.fourcc)) {
-    // VP9 Bitstream and Decoding Process Specification
-    // Sec 6.2 "Uncompressed header syntax", pp.28.
-    // https://storage.googleapis.com/downloads.webmproject.org/docs/vp9/vp9-bitstream-specification-v0.6-20160331-draft.pdf
-    //
-    // |show_frame| is the second bit (counting from the least
-    // significant one) of the VP9 frame header's first byte.
-    const bool show_frame =
-        (*(uint32_t*)buffers[queue_index].start[0] & (1 << 1));
-
-    // Assumption here is that an non-displayed frame is always followed by a
-    // displayed frame. Please reference super-frame for more details.
-    // http://downloads.webmproject.org/docs/vp9/vp9-bitstream_superframe-and-uncompressed-header_v1.0.pdf
-    if (!show_frame)
-      OUTPUT_queue->processed_frames++;
   }
 
   struct v4l2_buffer v4l2_buffer;
@@ -621,21 +598,16 @@ int submit_compressed_frame(struct compressed_file* file,
     return -1;
   }
 
-  // Counts processed displayed frames in OUTPUT_queue. Non-displayed frames
-  // are not counted as non-displayed frame is a part of a super-frame.
-  OUTPUT_queue->displayed_frames++;
-
   return 0;
 }
 
 int prime_OUTPUT(struct compressed_file* file,
-                 struct queue* OUTPUT_queue,
-                 uint32_t frames_to_decode) {
+                 struct queue* OUTPUT_queue) {
   int ret = 0;
 
   for (uint32_t i = 0; i < OUTPUT_queue->cnt; ++i) {
-    ret = submit_compressed_frame(file, OUTPUT_queue, i, frames_to_decode);
-    if (ret)
+    ret = submit_compressed_frame(file, OUTPUT_queue, i);
+    if (ret || file->is_at_end_of_file)
       break;
   }
   return ret;
@@ -887,6 +859,8 @@ int setup_CAPTURE(struct gbm_device* gbm,
     ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_STREAMON, &CAPTURE_queue->type);
     if (ret != 0)
       LOG_ERROR("VIDIOC_STREAMON failed: %s.", strerror(errno));
+    else
+      CAPTURE_queue->is_streaming = true;
   }
 
   return ret;
@@ -969,17 +943,15 @@ int dequeue_buffer(struct queue* queue,
         !(v4l2_buffer.timestamp.tv_sec < kTimestampMarkerForShowFrames);
   }
 
-  if (v4l2_buffer.flags & V4L2_BUF_FLAG_LAST) {
-    queue->buf_last_flag_has_been_set = true;
-  }
-
   return ret;
 }
 
 // 4.5.1.10. Drain
-// https://www.kernel.org/doc/html/latest/userspace-api/media/v4l/dev-decoder.html#drain
-int drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
-  // 1. Begin the drain sequence by issuing VIDIOC_DECODER_CMD().
+// https://www.kernel.org/doc/html/v5.4/media/uapi/v4l/dev-decoder.html#drain
+// initiate_drain should be called when the source ends or when the requested
+// number of frames has been met.
+int initiate_drain(struct queue* OUTPUT_queue) {
+  //  1. Begin the drain sequence by issuing VIDIOC_DECODER_CMD().
   struct v4l2_decoder_cmd cmd;
   memset(&cmd, 0, sizeof(cmd));
   cmd.cmd = V4L2_DEC_CMD_STOP;
@@ -987,47 +959,19 @@ int drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
   // V4L2_DEC_CMD_STOP may not be supported, but we haven't run into
   // a driver that doesn't support V4L2_DEC_CMD_STOP cmd.
   int ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_DECODER_CMD, &cmd);
-  assert(ret == 0);
+  if (!ret)
+    OUTPUT_queue->is_streaming = false;
 
-  // 2. Dequeue buffers
-  // The way the decode loop is set up, there shouldn't be any buffers
-  // left to dequeue. Furthermore, if the CAPTURE_queue has already set
-  // V4L2_BUF_FLAG_LAST, then there is no need to dequeue.
-  if (!CAPTURE_queue->buf_last_flag_has_been_set ) {
-    uint32_t bytesused = 0;
-    uint32_t flags = 0;
-    const int max_drain_delay = 2048;
-    // Checks to make sure the queue is empty.
-    // It takes time to execute V4L2_DEC_CMD_STOP cmd.
-    // From experiments, iterating |kMaxDrainDelay| times
-    // was good enough to get V4L2_BUF_FLAG_LAST flag.
-    int counter;
-    for (counter = max_drain_delay; counter > 0; --counter) {
-      ret = dequeue_buffer(CAPTURE_queue, NULL, &bytesused, &flags, NULL);
+  // 2. The decode loop needs to proceed normally as long as the CAPTURE
+  // queue has buffers that can be dequeued.
+  // This step occurs in the main |decode| loop.
+  return ret;
+}
 
-      if (ret == 0) {
-        break;
-      } else {
-        if (errno != EAGAIN) {
-          LOG_ERROR("VIDIOC_DQBUF failed: %s", strerror(errno));
-          break;
-        }
-      }
-    }
-
-    if (counter == 0) {
-      LOG_ERROR(
-          "V4L2_DEC_CMD_STOP cmd execution was not completed within %d "
-          "iterations.\n",
-          max_drain_delay);
-      ret = 1;
-    }
-
-    if (!CAPTURE_queue->buf_last_flag_has_been_set && (bytesused != 0)) {
-      LOG_ERROR("WARNING: CAPTURE queue did not clean up.\n");
-      ret = 1;
-    }
-  }
+int finish_drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
+  // Steps 1 and 2 in the drain sequence have already occurred when this is
+  // called.
+  int ret = 0;
 
   // 3. Reset by issuing VIDIOC_STREAMOFF
   int ret_streamoff =
@@ -1160,7 +1104,6 @@ bool process_opaque_frame(struct queue* CAPTURE_queue,
 
     LOG_DEBUG("Image Processor: dequeued frame from mdp_CAPTURE_queue with "
         "index %d.", v4l2_buffer.index);
-    mdp_CAPTURE_queue->processed_frames++;
     *mdp_CAPTURE_queue_dequeued_buffer_index = v4l2_buffer.index;
 
     const int ret =
@@ -1207,7 +1150,7 @@ int decode(struct compressed_file* file,
            struct queue* mdp_CAPTURE_queue) {
   int ret = 0;
 
-  while (CAPTURE_queue->processed_frames < OUTPUT_queue->processed_frames) {
+  while (ret == 0 && CAPTURE_queue->is_streaming) {
     {
       uint32_t index = 0;
       uint32_t flags = 0;
@@ -1224,8 +1167,7 @@ int decode(struct compressed_file* file,
         continue;
       }
 
-      CAPTURE_queue->processed_frames++;
-      if (show_frame) {
+      if (show_frame && CAPTURE_queue->displayed_frames < frames_to_decode) {
         CAPTURE_queue->displayed_frames++;
 
         if (process_opaque_frame_fp) {
@@ -1262,15 +1204,23 @@ int decode(struct compressed_file* file,
             map_buffers_and_calculate_md5hash(CAPTURE_queue, index);
         }
       }
+      else if (flags & V4L2_BUF_FLAG_LAST) {
+        // If |CAPTURE_queue| is streaming, keep queueing and dequeueing
+        // buffers on it until a buffer marked with the V4L2_BUF_FLAG_LAST flag
+        // is dequeued.
+        CAPTURE_queue->is_streaming = false;
+      }
 
-      // Break out of the decode loop if V4L2_BUF_FLAG_LAST is set.
-      if (CAPTURE_queue->buf_last_flag_has_been_set) {
-        LOG_INFO("CAPTURE_queue produced last buffer.");
-        break;
+      // When the device has decoded |frames_to_decode| displayable frames,
+      // start the drain sequence.
+      if (!ret && OUTPUT_queue->is_streaming &&
+          CAPTURE_queue->displayed_frames >= frames_to_decode) {
+        ret = initiate_drain(OUTPUT_queue);
       }
 
       // Done with buffer, queue it back up.
-      ret = queue_buffer_CAPTURE(CAPTURE_queue, index);
+      if (!ret)
+        ret = queue_buffer_CAPTURE(CAPTURE_queue, index);
     }
 
     // A frame was recieved on the CAPTURE queue, that means there should
@@ -1289,15 +1239,23 @@ int decode(struct compressed_file* file,
         continue;
       }
 
-      submit_compressed_frame(file, OUTPUT_queue, index, frames_to_decode);
+      if (OUTPUT_queue->is_streaming) {
+        ret = submit_compressed_frame(file, OUTPUT_queue, index);
+
+        // If there are no remaining frames, we should stop the OUTPUT queue.
+        // Doing so, lets the decoder know it should process the remaining
+        // buffers in the output queue, then dequeue a buffer with
+        // V4L2_BUF_FLAG_LAST set. After that happens, the decode loop will
+        // stop.
+        if (!ret && file->is_at_end_of_file)
+          ret = initiate_drain(OUTPUT_queue);
+      }
     }
   }
 
-  drain(OUTPUT_queue, CAPTURE_queue);
+  finish_drain(OUTPUT_queue, CAPTURE_queue);
 
-  LOG_INFO("%d frames decoded, %d displayable, %d non-visible.",
-           CAPTURE_queue->processed_frames, CAPTURE_queue->displayed_frames,
-           CAPTURE_queue->processed_frames - CAPTURE_queue->displayed_frames);
+  LOG_INFO("%d displayable frames decoded.", CAPTURE_queue->displayed_frames);
 
   return ret;
 }
@@ -1443,13 +1401,13 @@ int main(int argc, char* argv[]) {
                                .fourcc = compressed_file.header.fourcc,
                                .num_planes = 1,
                                .memory = V4L2_MEMORY_MMAP,
-                               .processed_frames = 0,
-                               .displayed_frames = 0};
+                               .displayed_frames = 0,
+                               .is_streaming = false};
   int ret = setup_OUTPUT(&OUTPUT_queue, /*optional_width=*/NULL,
        /*optional_height=*/NULL);
 
   if (!ret)
-    ret = prime_OUTPUT(&compressed_file, &OUTPUT_queue, frames_to_decode);
+    ret = prime_OUTPUT(&compressed_file, &OUTPUT_queue);
 
   struct queue CAPTURE_queue = {.v4lfd = v4lfd,
                                 .type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
@@ -1460,8 +1418,8 @@ int main(int argc, char* argv[]) {
                                   .top = 0,
                                   .width = compressed_file.header.width,
                                   .height = compressed_file.header.height},
-                                .processed_frames = 0,
-                                .displayed_frames = 0};
+                                .displayed_frames = 0,
+                                .is_streaming = false};
   if (!ret) {
     ret = setup_CAPTURE(gbm, &CAPTURE_queue, modifier, frame_rate,
       /*use_CAPTURE_queue_dimensions=*/false);
@@ -1512,8 +1470,8 @@ int main(int argc, char* argv[]) {
     mdp_OUTPUT_queue->fourcc = uncompressed_fourcc;
     mdp_OUTPUT_queue->num_planes = 2;
     mdp_OUTPUT_queue->memory = V4L2_MEMORY_DMABUF;
-    mdp_OUTPUT_queue->processed_frames = 0;
     mdp_OUTPUT_queue->displayed_frames = 0;
+    mdp_OUTPUT_queue->is_streaming = false;
     int ret = setup_OUTPUT(mdp_OUTPUT_queue, &CAPTURE_queue.coded_width,
         &CAPTURE_queue.coded_height);
     if (ret < 0)
@@ -1530,8 +1488,8 @@ int main(int argc, char* argv[]) {
     mdp_CAPTURE_queue->display_area.top = 0;
     mdp_CAPTURE_queue->display_area.width = compressed_file.header.width;
     mdp_CAPTURE_queue->display_area.height = compressed_file.header.height;
-    mdp_CAPTURE_queue->processed_frames = 0;
     mdp_CAPTURE_queue->displayed_frames = 0;
+    mdp_CAPTURE_queue->is_streaming = false;
     ret = setup_CAPTURE(gbm, mdp_CAPTURE_queue, DRM_FORMAT_MOD_NONE,
         /*frame_rate=*/0, /*use_CAPTURE_queue_dimensions=*/ true);
     if (ret < 0)
