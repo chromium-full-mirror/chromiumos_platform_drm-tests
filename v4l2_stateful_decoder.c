@@ -70,6 +70,9 @@ static const int kRequestBufferCount = 8;
 static const int kTimestampMarkerForShowFrames = 1;
 static const uint32_t kIVFHeaderSignature = v4l2_fourcc('D', 'K', 'I', 'F');
 static const uint32_t kInvalidFrameRate = 0;
+// |kMaxRetryCount = 2^24| takes around 20 seconds to exhaust all retries on
+// Trogdor when a decode stalls.
+static const int kMaxRetryCount = 1 << 24;
 
 static const char* kImageProcessorDevice = "/dev/image-proc0";
 static const int kInvalidBufferIndex = -1;
@@ -1084,7 +1087,7 @@ bool process_opaque_frame(struct queue* CAPTURE_queue,
 
     v4l2_buffer.length = mdp_CAPTURE_queue->num_planes;
 
-    int num_tries = INT_MAX;
+    int num_tries = kMaxRetryCount;
     bool keep_trying = false;
     do {
       const int ret =
@@ -1150,7 +1153,12 @@ int decode(struct compressed_file* file,
            struct queue* mdp_CAPTURE_queue) {
   int ret = 0;
 
-  while (ret == 0 && CAPTURE_queue->is_streaming) {
+  // If no buffers have been dequeued for more than |kMaxRetryCount| retries, we
+  // should exit the program. Something is wrong in the decoder or with how we
+  // are controlling it.
+  int num_tries = kMaxRetryCount;
+
+  while (ret == 0 && CAPTURE_queue->is_streaming && num_tries != 0) {
     {
       uint32_t index = 0;
       uint32_t flags = 0;
@@ -1164,8 +1172,11 @@ int decode(struct compressed_file* file,
           ret = ret_dequeue;
           break;
         }
+        num_tries--;
         continue;
       }
+      // Successfully dequeued a buffer. Reset the |num_tries| counter.
+      num_tries = kMaxRetryCount;
 
       if (show_frame && CAPTURE_queue->displayed_frames < frames_to_decode) {
         CAPTURE_queue->displayed_frames++;
@@ -1251,6 +1262,11 @@ int decode(struct compressed_file* file,
           ret = initiate_drain(OUTPUT_queue);
       }
     }
+  }
+
+  if (num_tries == 0) {
+    LOG_FATAL("Decoder appeared to stall after decoding %d frames.",
+              CAPTURE_queue->displayed_frames);
   }
 
   finish_drain(OUTPUT_queue, CAPTURE_queue);
