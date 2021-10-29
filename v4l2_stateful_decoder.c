@@ -60,8 +60,9 @@ enum logging_levels {
 // Only available in kernels 5.4 and later.
 #ifndef V4L2_PIX_FMT_NV12_UBWC
 #define V4L2_PIX_FMT_NV12_UBWC v4l2_fourcc('Q', '1', '2', '8') /* UBWC 8-bit Y/CbCr 4:2:0  */
-
 #endif
+
+#define V4L2_PIX_FMT_INVALID 0
 
 static const char* kDecodeDevice = "/dev/video-dec0";
 static const int kInputbufferMaxSize = 4 * 1024 * 1024;
@@ -72,6 +73,9 @@ static const uint32_t kInvalidFrameRate = 0;
 
 static const char* kImageProcessorDevice = "/dev/image-proc0";
 static const int kInvalidBufferIndex = -1;
+
+static uint32_t kPreferredUncompressedFourCCs[] = {V4L2_PIX_FMT_NV12,
+                                                   V4L2_PIX_FMT_MT21C};
 
 static int log_run_level = DEFAULT_LOG_LEVEL;
 
@@ -167,7 +171,8 @@ struct compressed_file open_file(const char* file_name) {
     file.fp = fp;
 
     char fourcc[FOURCC_SIZE + 1];
-    LOG_INFO("OUTPUT format: %s", fourcc_to_string(file.header.fourcc, fourcc));
+    LOG_INFO("Ivf file format: %s",
+        fourcc_to_string(file.header.fourcc, fourcc));
 
     LOG_INFO("Ivf file header: %d x %d", file.header.width, file.header.height);
     // |width| and |height| should be even numbers.
@@ -183,54 +188,67 @@ struct compressed_file open_file(const char* file_name) {
   return file;
 }
 
-int query_format(int v4lfd, enum v4l2_buf_type type, uint32_t fourcc) {
-  struct v4l2_fmtdesc fmtdesc;
-  memset(&fmtdesc, 0, sizeof(fmtdesc));
-
-  fmtdesc.type = type;
-  while (ioctl(v4lfd, VIDIOC_ENUM_FMT, &fmtdesc) == 0) {
-    if (fourcc == 0) {
-      char fourcc_str[FOURCC_SIZE + 1];
-      LOG_INFO("%s", fourcc_to_string(fmtdesc.pixelformat, fourcc_str));
-    } else if (fourcc == fmtdesc.pixelformat)
-      return 1;
-    fmtdesc.index++;
-  }
-
-  return 0;
-}
-
-int capabilities(int v4lfd,
-                 uint32_t compressed_format,
-                 uint32_t uncompressed_format) {
-  struct v4l2_capability cap;
-  memset(&cap, 0, sizeof(cap));
-  int ret = ioctl(v4lfd, VIDIOC_QUERYCAP, &cap);
+// Verifies that |v4lfd| can be queried for capabilities, and prints them. If
+// the ioctl() fails, a FATAL is issued and terminates the program.
+void query_driver(int v4lfd) {
+  struct v4l2_capability cap = {};
+  const int ret = ioctl(v4lfd, VIDIOC_QUERYCAP, &cap);
   if (ret != 0)
-    LOG_ERROR("VIDIOC_QUERYCAP failed: %s.", strerror(errno));
+    LOG_FATAL("VIDIOC_QUERYCAP failed: %s.", strerror(errno));
 
   LOG_INFO("Driver=\"%s\" bus_info=\"%s\" card=\"%s\" fd=0x%x", cap.driver,
            cap.bus_info, cap.card, v4lfd);
+}
 
-  if (!query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-                    compressed_format)) {
+bool is_fourcc_supported(int v4lfd, enum v4l2_buf_type type, uint32_t fourcc) {
+  struct v4l2_fmtdesc fmtdesc = { .type = type };
+  while (ioctl(v4lfd, VIDIOC_ENUM_FMT, &fmtdesc) == 0) {
+    if (fourcc == fmtdesc.pixelformat)
+      return true;
+    fmtdesc.index++;
+  }
+  return false;
+}
+
+// Verifies that |v4lfd| supports |compressed_format| and, if specified,
+// |uncompressed_format|. If |uncompressed_format| is not specified, i.e. it's
+// equal to V4L2_PIX_FMT_INVALID, then kPreferredUncompressedFourCCs are tried
+// instead and the first supported one returned in |uncompressed_format|. If any
+// command fails, the function returns false.
+bool capabilities(int v4lfd,
+                  uint32_t compressed_format,
+                  uint32_t* uncompressed_format) {
+  if (!is_fourcc_supported(v4lfd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+                           compressed_format)) {
     char fourcc_str[FOURCC_SIZE + 1];
-    LOG_ERROR("%s is not supported, supported formats are...",
+    LOG_ERROR("%s is not supported for OUTPUT, try running `v4l2-ctl "
+        "--list-formats-out-ext -d <device file>` for more info",
         fourcc_to_string(compressed_format, fourcc_str));
-    query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, 0);
-    ret = 1;
+    return false;
   }
 
-  if (!query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-                    uncompressed_format)) {
-    char fourcc_str[FOURCC_SIZE + 1];
-    LOG_ERROR("%s is not supported, supported formats are...",
-        fourcc_to_string(uncompressed_format, fourcc_str));
-    query_format(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, 0);
-    ret = 1;
+  if (*uncompressed_format != V4L2_PIX_FMT_INVALID) {
+    if (!is_fourcc_supported(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                             *uncompressed_format)) {
+      char fourcc_str[FOURCC_SIZE + 1];
+      LOG_ERROR("%s is not supported for CAPTURE, try running `v4l2-ctl "
+          "--list-formats-ext -d <device file>` for more info",
+          fourcc_to_string(*uncompressed_format, fourcc_str));
+      return false;
+    }
+  } else {
+    const size_t num_fourccs =
+        sizeof(kPreferredUncompressedFourCCs) / sizeof(uint32_t);
+    for (size_t i = 0; i < num_fourccs; ++i) {
+      if (is_fourcc_supported(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                              kPreferredUncompressedFourCCs[i]))  {
+        *uncompressed_format = kPreferredUncompressedFourCCs[i];
+        return true;
+      }
+    }
+    return false;
   }
-
-  return ret;
+  return true;
 }
 
 int request_mmap_buffers(struct queue* queue,
@@ -786,7 +804,6 @@ int setup_CAPTURE(struct gbm_device* gbm,
 
   return ret;
 }
-
 void write_frame_to_disk(FILE* fp,
                         struct queue* CAPTURE_queue,
                         uint32_t queue_index) {
@@ -1213,7 +1230,8 @@ static void print_help(const char* argv0) {
   printf("  -w, --write       write out decompressed frames to a file\n");
   printf("  -m, --max         max number of visible frames to decode\n");
   printf("  -b, --buffer      use mmap instead of dmabuf\n");
-  printf("  -o, --output_fmt  fourcc of output format\n");
+  printf("  -c, --capture_fmt fourcc of the CAPTURE queue, i.e. the "
+                             "decoded video format\n");
   printf("  -l, --log_level   specifies log level, 0:debug 1:info 2:error "
                              "3:fatal (default: %d)\n", DEFAULT_LOG_LEVEL);
   printf("  -r, --frame_rate  (optional) specify a frame rate (Hz)\n");
@@ -1226,7 +1244,7 @@ static const struct option longopts[] = {
     {"write", no_argument, NULL, 'w'},
     {"max", required_argument, NULL, 'm'},
     {"buffer", no_argument, NULL, 'b'},
-    {"output_fmt", required_argument, NULL, 'o'},
+    {"capture_fmt", required_argument, NULL, 'c'},
     {"log_level", required_argument, NULL, 'l'},
     {"md5", no_argument, NULL, 'd'},
     {"frame_rate", required_argument, NULL, 'r'},
@@ -1241,7 +1259,7 @@ int main(int argc, char* argv[]) {
   uint32_t frames_to_decode = UINT_MAX;
   uint32_t frame_rate = kInvalidFrameRate;
   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
-  uint32_t uncompressed_fourcc = V4L2_PIX_FMT_NV12;
+  uint32_t uncompressed_fourcc = V4L2_PIX_FMT_INVALID;
   uint32_t CAPTURE_memory = V4L2_MEMORY_DMABUF;
 
   while ((c = getopt_long(argc, argv, "wbdm:f:o:l:r:", longopts, NULL)) != -1) {
@@ -1258,13 +1276,20 @@ int main(int argc, char* argv[]) {
       case 'b':
         CAPTURE_memory = V4L2_MEMORY_MMAP;
         break;
-      case 'o':
+      case 'c':
         if (strlen(optarg) == 4) {
           uncompressed_fourcc =
               v4l2_fourcc(toupper(optarg[0]), toupper(optarg[1]),
                           toupper(optarg[2]), toupper(optarg[3]));
-          if (uncompressed_fourcc == V4L2_PIX_FMT_NV12_UBWC)
+
+          char fourcc[FOURCC_SIZE + 1];
+          LOG_INFO("User-provided CAPTURE format: %s",
+              fourcc_to_string(uncompressed_fourcc, fourcc));
+
+          if (uncompressed_fourcc == V4L2_PIX_FMT_NV12_UBWC) {
             modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+            LOG_INFO("CAPTURE format is compressed, setting modifier.");
+          }
         }
         break;
       case 'l': {
@@ -1297,12 +1322,6 @@ int main(int argc, char* argv[]) {
 
   if (frames_to_decode != UINT_MAX)
     LOG_INFO("Only decoding a max of %d frames.", frames_to_decode);
-
-  char fourcc[FOURCC_SIZE + 1];
-  LOG_INFO("CAPTURE format: %s", fourcc_to_string(uncompressed_fourcc, fourcc));
-
-  if (uncompressed_fourcc == V4L2_PIX_FMT_NV12_UBWC)
-    LOG_INFO("Compressed format, setting modifier.");
 
   if (!file_name) {
     print_help(argv[0]);
@@ -1341,10 +1360,11 @@ int main(int argc, char* argv[]) {
   int v4lfd = open(kDecodeDevice, O_RDWR | O_NONBLOCK | O_CLOEXEC);
   if (v4lfd < 0)
     LOG_FATAL("Unable to open device file: %s.", kDecodeDevice);
+  query_driver(v4lfd);
 
-  if (capabilities(v4lfd, compressed_file.header.fourcc, uncompressed_fourcc) !=
-      0)
+  if (!capabilities(v4lfd, compressed_file.header.fourcc, &uncompressed_fourcc))
     LOG_FATAL("Not enough capabilities present for decoding.");
+  assert(uncompressed_fourcc != V4L2_PIX_FMT_INVALID);
 
   struct queue OUTPUT_queue = {.v4lfd = v4lfd,
                                .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
@@ -1378,6 +1398,8 @@ int main(int argc, char* argv[]) {
   struct queue* mdp_OUTPUT_queue = NULL;
   struct queue* mdp_CAPTURE_queue = NULL;
   if (!ret && uncompressed_fourcc == V4L2_PIX_FMT_MT21C) {
+    char fourcc[FOURCC_SIZE + 1];
+    fourcc_to_string(uncompressed_fourcc, fourcc);
     LOG_INFO("Image Processor: needed, %s is an opaque format.", fourcc);
     // MT21C is a specific opaque MediaTek format and seems, sadly,
     // undocumented, forcing the use of a specific ImageProcessor, called by
@@ -1389,17 +1411,19 @@ int main(int argc, char* argv[]) {
       LOG_FATAL("Image Processor: Unable to open dev file: %s.",
           kImageProcessorDevice);
     }
+    query_driver(mdp_fd);
+
     // MDP claims to support (from v4l2-ctl):
     //  [0]: 'NM12' (Y/CbCr 4:2:0 (N-C))
     //  [1]: 'YM12' (Planar YUV 4:2:0 (N-C))
     //  [2]: 'YV12' (Planar YVU 4:2:0)
     // Chrome uses V4L2_PIX_FMT_YVU420 (YV12).
-    const uint32_t readable_fourcc = V4L2_PIX_FMT_YUV420M ;
+    uint32_t readable_fourcc = V4L2_PIX_FMT_YUV420M ;
     const uint32_t readable_fourcc_num_planes = 3;
-    if (capabilities(
-        mdp_fd, uncompressed_fourcc, readable_fourcc) != 0) {
-      LOG_FATAL("Image processor doesn't support the expected formats.");
-    }
+    if (!capabilities(mdp_fd, uncompressed_fourcc, &readable_fourcc))
+      LOG_FATAL("Image processor: Expected formats not supported.");
+    assert(readable_fourcc == V4L2_PIX_FMT_YUV420M);
+
     char mdp_fourcc[FOURCC_SIZE + 1];
     fourcc_to_string(readable_fourcc, mdp_fourcc);
     LOG_INFO("Image Processor: OUTPUT format %s --> CAPTURE format: %s",
