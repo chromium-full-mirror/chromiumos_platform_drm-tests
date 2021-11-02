@@ -210,37 +210,38 @@ bool is_fourcc_supported(int v4lfd, enum v4l2_buf_type type, uint32_t fourcc) {
   return false;
 }
 
-// Verifies that |v4lfd| supports |compressed_format| and, if specified,
+// Verifies that |fd| supports |compressed_format| and, if specified,
 // |uncompressed_format|. If |uncompressed_format| is not specified, i.e. it's
 // equal to V4L2_PIX_FMT_INVALID, then kPreferredUncompressedFourCCs are tried
 // instead and the first supported one returned in |uncompressed_format|. If any
 // command fails, the function returns false.
-bool capabilities(int v4lfd,
+bool capabilities(int fd,
+                  const char* fd_name,
                   uint32_t compressed_format,
                   uint32_t* uncompressed_format) {
-  if (!is_fourcc_supported(v4lfd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+  if (!is_fourcc_supported(fd, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
                            compressed_format)) {
     char fourcc_str[FOURCC_SIZE + 1];
     LOG_ERROR("%s is not supported for OUTPUT, try running `v4l2-ctl "
-        "--list-formats-out-ext -d <device file>` for more info",
-        fourcc_to_string(compressed_format, fourcc_str));
+        "--list-formats-out-ext -d %s` for more info",
+        fourcc_to_string(compressed_format, fourcc_str), fd_name);
     return false;
   }
 
   if (*uncompressed_format != V4L2_PIX_FMT_INVALID) {
-    if (!is_fourcc_supported(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+    if (!is_fourcc_supported(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                              *uncompressed_format)) {
       char fourcc_str[FOURCC_SIZE + 1];
       LOG_ERROR("%s is not supported for CAPTURE, try running `v4l2-ctl "
-          "--list-formats-ext -d <device file>` for more info",
-          fourcc_to_string(*uncompressed_format, fourcc_str));
+          "--list-formats-ext -d %s` for more info",
+          fourcc_to_string(*uncompressed_format, fourcc_str), fd_name);
       return false;
     }
   } else {
     const size_t num_fourccs =
         sizeof(kPreferredUncompressedFourCCs) / sizeof(uint32_t);
     for (size_t i = 0; i < num_fourccs; ++i) {
-      if (is_fourcc_supported(v4lfd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+      if (is_fourcc_supported(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                               kPreferredUncompressedFourCCs[i]))  {
         *uncompressed_format = kPreferredUncompressedFourCCs[i];
         return true;
@@ -1362,8 +1363,10 @@ int main(int argc, char* argv[]) {
     LOG_FATAL("Unable to open device file: %s.", kDecodeDevice);
   query_driver(v4lfd);
 
-  if (!capabilities(v4lfd, compressed_file.header.fourcc, &uncompressed_fourcc))
+  if (!capabilities(v4lfd, kDecodeDevice, compressed_file.header.fourcc,
+      &uncompressed_fourcc)) {
     LOG_FATAL("Not enough capabilities present for decoding.");
+  }
   assert(uncompressed_fourcc != V4L2_PIX_FMT_INVALID);
 
   struct queue OUTPUT_queue = {.v4lfd = v4lfd,
@@ -1420,8 +1423,10 @@ int main(int argc, char* argv[]) {
     // Chrome uses V4L2_PIX_FMT_YVU420 (YV12).
     uint32_t readable_fourcc = V4L2_PIX_FMT_YUV420M ;
     const uint32_t readable_fourcc_num_planes = 3;
-    if (!capabilities(mdp_fd, uncompressed_fourcc, &readable_fourcc))
+    if (!capabilities(mdp_fd, kImageProcessorDevice, uncompressed_fourcc,
+        &readable_fourcc)) {
       LOG_FATAL("Image processor: Expected formats not supported.");
+    }
     assert(readable_fourcc == V4L2_PIX_FMT_YUV420M);
 
     char mdp_fourcc[FOURCC_SIZE + 1];
