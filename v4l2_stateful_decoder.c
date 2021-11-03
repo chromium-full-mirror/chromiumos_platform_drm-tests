@@ -1230,7 +1230,7 @@ static void print_help(const char* argv0) {
   printf("  -f, --file        ivf file to decode\n");
   printf("  -w, --write       write out decompressed frames to a file\n");
   printf("  -m, --max         max number of visible frames to decode\n");
-  printf("  -b, --buffer      use mmap instead of dmabuf\n");
+  printf("  -a, --mmap        use mmap instead of dmabuf\n");
   printf("  -c, --capture_fmt fourcc of the CAPTURE queue, i.e. the "
                              "decoded video format\n");
   printf("  -l, --log_level   specifies log level, 0:debug 1:info 2:error "
@@ -1244,7 +1244,7 @@ static const struct option longopts[] = {
     {"file", required_argument, NULL, 'f'},
     {"write", no_argument, NULL, 'w'},
     {"max", required_argument, NULL, 'm'},
-    {"buffer", no_argument, NULL, 'b'},
+    {"mmap", no_argument, NULL, 'a'},
     {"capture_fmt", required_argument, NULL, 'c'},
     {"log_level", required_argument, NULL, 'l'},
     {"md5", no_argument, NULL, 'd'},
@@ -1261,7 +1261,7 @@ int main(int argc, char* argv[]) {
   uint32_t frame_rate = kInvalidFrameRate;
   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
   uint32_t uncompressed_fourcc = V4L2_PIX_FMT_INVALID;
-  uint32_t CAPTURE_memory = V4L2_MEMORY_DMABUF;
+  enum v4l2_memory CAPTURE_memory = V4L2_MEMORY_DMABUF;
 
   while ((c = getopt_long(argc, argv, "wbdm:f:o:l:r:", longopts, NULL)) != -1) {
     switch (c) {
@@ -1274,7 +1274,7 @@ int main(int argc, char* argv[]) {
       case 'w':
         write_out = true;
         break;
-      case 'b':
+      case 'a':
         CAPTURE_memory = V4L2_MEMORY_MMAP;
         break;
       case 'c':
