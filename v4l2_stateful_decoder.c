@@ -1301,6 +1301,7 @@ int decode(struct gbm_device* gbm,
             LOG_ERROR("Image Processor failed.");
             return -1;
           }
+          mdp_CAPTURE_queue->displayed_frames++;
           if (output_file_prefix &&
               mdp_CAPTURE_queue_buffer_index != kInvalidBufferIndex) {
             write_frame_to_disk(output_file_prefix, mdp_CAPTURE_queue,
