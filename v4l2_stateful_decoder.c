@@ -289,6 +289,24 @@ int dequeue_event(struct queue* queue, uint32_t* type) {
   return ret;
 }
 
+bool apply_selection_to_queue(struct queue* queue,
+                              struct v4l2_rect display_area) {
+  struct v4l2_selection selection = {
+     // |type| has a note in the header:"(do not use *_MPLANE types)".
+     .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+     .target = V4L2_SEL_TGT_CROP,
+     .flags = 0};
+  memcpy(&selection.r, &display_area, sizeof(struct v4l2_rect));
+  if (ioctl(queue->v4lfd, VIDIOC_S_SELECTION, &selection) != 0) {
+    LOG_ERROR("VIDIOC_S_SELECTION failed: %s.", strerror(errno));
+    return false;
+  }
+  assert(selection.r.left == 0);
+  assert(selection.r.top == 0);
+  LOG_INFO("Queue selection %dx%d", selection.r.width, selection.r.height);
+  return true;
+}
+
 int request_mmap_buffers(struct queue* queue,
                          struct v4l2_requestbuffers* reqbuf) {
   const int v4lfd = queue->v4lfd;
@@ -1588,6 +1606,9 @@ int main(int argc, char* argv[]) {
         &CAPTURE_queue.coded_height);
     if (ret < 0)
       LOG_FATAL("Image Processor: Unable to configure OUTPUT_queue.");
+
+    if (!apply_selection_to_queue(mdp_OUTPUT_queue, CAPTURE_queue.display_area))
+      LOG_FATAL("Image Processor: Unable to set SELECTION for OUTPUT_queue.");
 
     // |mdp_CAPTURE_queue| has "clear" and fully mappable and readable frames.
     mdp_CAPTURE_queue = malloc(sizeof(struct queue));
