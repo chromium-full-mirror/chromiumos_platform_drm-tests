@@ -924,11 +924,27 @@ void write_frame_to_disk(const char* output_file_prefix,
   if (!fp)
     LOG_ERROR("Unable to open output yuv file: %s.", file_name);
 
-  // TODO(b/204566257) doesn't support writing full decoded buffers
-  struct data_buffer buffer_i420 =
-    map_buffers_and_convert_to_i420(CAPTURE_queue, queue_index);
+  if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_YUV420M) {
+    // Technically this path could also support V4L2_PIX_FMT_YVU420 and other
+    // I420 variations, but it's not properly tested/commonly utilized.
+    const size_t num_coded_pixels = CAPTURE_queue->coded_width *
+                                    CAPTURE_queue->coded_height;
+    uint8_t* y_buffer = CAPTURE_queue->buffers[queue_index].start[0];
+    fwrite(y_buffer, num_coded_pixels, 1, fp);
 
-  fwrite(buffer_i420.data, buffer_i420.size, 1, fp);
+    for (uint32_t i = 1; i < CAPTURE_queue->num_planes; ++i) {
+      const size_t uv_plane_size = ((CAPTURE_queue->coded_width + 1) / 2) *
+                                   ((CAPTURE_queue->coded_height + 1) / 2);
+      uint8_t* chroma_buffer = CAPTURE_queue->buffers[queue_index].start[i];
+      fwrite(chroma_buffer, uv_plane_size, 1, fp);
+    }
+  } else {
+    // TODO(b/204566257) doesn't support writing full decoded buffers
+    struct data_buffer buffer_i420 =
+      map_buffers_and_convert_to_i420(CAPTURE_queue, queue_index);
+
+    fwrite(buffer_i420.data, buffer_i420.size, 1, fp);
+  }
 
   fclose(fp);
 }
