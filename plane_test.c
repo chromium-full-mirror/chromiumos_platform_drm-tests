@@ -237,6 +237,23 @@ static bool update_test_plane(int step,
   return needs_set;
 }
 
+static bool parse_crtc_mask(const char* str, uint32_t* mask) {
+  unsigned int m;
+
+  if (sscanf(str, "%x", &m) != 1) {
+    printf("unrecognized CRTC mask \"%s\"\n", str);
+    return false;
+  }
+
+  if (m == 0) {
+    printf("CRTC mask must be non-zero\n");
+    return false;
+  }
+
+  *mask = m;
+  return true;
+}
+
 static bool parse_size(const char* str, uint32_t* w, uint32_t* h) {
   if (sscanf(str, "%ux%u", w, h) == 2)
     return true;
@@ -293,6 +310,7 @@ static bool parse_rect(const char* str,
 
 static const struct option longopts[] = {
     {"external", no_argument, NULL, 'e'},
+    {"crtc-mask", required_argument, NULL, 'm'},
     {"plane", no_argument, NULL, 'p'},
     {"format", required_argument, NULL, 'f'},
     {"size", required_argument, NULL, 'z'},
@@ -307,6 +325,7 @@ static const struct option longopts[] = {
 static void print_help(const char* argv0) {
   printf("usage: %s [OPTIONS]\n", argv0);
   printf("  -e, --external            prefer using the external connector (and not the eDP)\n");
+  printf("  -m, --crtc-mask MASK      only use the selected CRTC mask (defaults to any CRTC)\n");
   printf("  -p, --plane               indicates that subsequent parameters are for a new plane\n");
   printf("  -f, --format FOURCC       format of source buffer (defaults to NV12)\n");
   printf("  -z, --size WIDTHxHEIGHT   size of the source buffer (defaults to screen size)\n");
@@ -330,13 +349,18 @@ int main(int argc, char** argv) {
   uint32_t test_planes_formats[MAX_TEST_PLANES] = {0};
   uint32_t test_planes_ids[MAX_TEST_PLANES] = {0};
   bool use_external_connectors = false;
+  uint32_t crtc_mask = 0;
 
   int c;
-  while ((c = getopt_long(argc, argv, "epf:z:c:ts:d:h", longopts, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "em:pf:z:c:ts:d:h", longopts, NULL)) != -1) {
     struct test_plane* current_plane = &test_planes[test_planes_count - 1];
     switch (c) {
       case 'e':
         use_external_connectors = true;
+        break;
+      case 'm':
+        if (!parse_crtc_mask(optarg, &crtc_mask))
+          return 1;
         break;
       case 'p':
         test_planes_count++;
@@ -399,6 +423,8 @@ int main(int argc, char** argv) {
                               : bs_drm_connectors_internal_rank;
   bs_drm_pipe_plumber_connector_ranks(plumber, connectors_ranked_list);
   bs_drm_pipe_plumber_connector_ptr(plumber, &connector);
+  if (crtc_mask)
+    bs_drm_pipe_plumber_crtc_mask(plumber, crtc_mask);
   if (!bs_drm_pipe_plumber_make(plumber, &pipe)) {
     bs_debug_error("failed to make pipe");
     return 1;
