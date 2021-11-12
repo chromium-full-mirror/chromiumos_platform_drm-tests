@@ -8,4 +8,6 @@ CFLAGS += -std=gnu99 -I$(SRC)
 
 CC_STATIC_LIBRARY(libbitstreams.pic.a): \
   bitstreams/bitstream_helper.o \
-  bitstreams/bitstream_helper_ivf.o
+  bitstreams/bitstream_helper_ivf.o \
+  bitstreams/bitstream_helper_h264.o \
+  bitstreams/h264_partial_parser.o

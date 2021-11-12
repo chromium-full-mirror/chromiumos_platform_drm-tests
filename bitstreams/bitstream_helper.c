@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <sys/mman.h>
 
+#include "bitstreams/bitstream_helper_h264.h"
 #include "bitstreams/bitstream_helper_ivf.h"
 #include "v4l2_macros.h"
 
@@ -38,7 +39,15 @@ bool init_bitstream(char* filename) {
   file_buf =
       (uint8_t*)mmap(NULL, filesize, PROT_READ, MAP_SHARED, fileno(fd), 0);
 
-  if (init_bitstream_ivf()) {
+  if (init_bitstream_h264()) {
+    LOG_INFO("Initializing H264 bitstream");
+
+    get_fourcc = get_fourcc_h264;
+    is_end_of_stream = is_end_of_stream_h264;
+    fill_compressed_buffer = fill_compressed_buffer_h264;
+
+    return true;
+  } else if (init_bitstream_ivf()) {
     get_fourcc = get_fourcc_ivf;
     is_end_of_stream = is_end_of_stream_ivf;
     fill_compressed_buffer = fill_compressed_buffer_ivf;
