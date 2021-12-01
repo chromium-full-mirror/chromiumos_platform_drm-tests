@@ -15,9 +15,11 @@
  * atomictest
  */
 
+#include <errno.h>
 #include <getopt.h>
 #include <inttypes.h>
 #include <pthread.h>
+#include <string.h>
 #include <sync/sync.h>
 
 #include "bs_drm.h"
@@ -366,14 +368,14 @@ static int get_plane_props(int fd, struct atomictest_plane *plane, drmModeObject
 	return 0;
 }
 
-int set_connector_props(struct atomictest_connector *conn, drmModeAtomicReqPtr pset)
+static int set_connector_props(struct atomictest_connector *conn, drmModeAtomicReqPtr pset)
 {
 	uint32_t id = conn->connector_id;
 	CHECK_RESULT(drmModeAtomicAddProperty(pset, id, conn->crtc_id.pid, conn->crtc_id.value));
 	return 0;
 }
 
-int set_crtc_props(struct atomictest_crtc *crtc, drmModeAtomicReqPtr pset)
+static int set_crtc_props(struct atomictest_crtc *crtc, drmModeAtomicReqPtr pset)
 {
 	uint32_t id = crtc->crtc_id;
 	CHECK_RESULT(drmModeAtomicAddProperty(pset, id, crtc->mode_id.pid, crtc->mode_id.value));
@@ -394,7 +396,7 @@ int set_crtc_props(struct atomictest_crtc *crtc, drmModeAtomicReqPtr pset)
 	return 0;
 }
 
-int set_plane_props(struct atomictest_plane *plane, drmModeAtomicReqPtr pset)
+static int set_plane_props(struct atomictest_plane *plane, drmModeAtomicReqPtr pset)
 {
 	uint32_t id = plane->drm_plane.plane_id;
 	CHECK_RESULT(drmModeAtomicAddProperty(pset, id, plane->crtc_id.pid, plane->crtc_id.value));
@@ -729,30 +731,46 @@ static int enable_crtc(struct atomictest_context *ctx, struct atomictest_crtc *c
 			return 0;
 	}
 
-	bs_debug_error("[CRTC:%d]: failed to find mode", crtc->crtc_id);
+	bs_debug_error("[CRTC:%d]: failed to find mode: %s", crtc->crtc_id, strerror(errno));
 	return ret;
 }
 
-static int disable_crtc(struct atomictest_context *ctx, struct atomictest_crtc *crtc)
+static int disable_crtcs(struct atomictest_context *ctx, uint32_t crtc_mask)
 {
 	for (uint32_t i = 0; i < ctx->num_connectors; i++) {
 		ctx->connectors[i].crtc_id.value = 0;
 		set_connector_props(&ctx->connectors[i], ctx->pset);
 	}
 
-	crtc->mode_id.value = 0;
-	crtc->active.value = 0;
-	if (crtc->ctm.pid)
-		crtc->ctm.value = 0;
-	if (crtc->gamma_lut.pid)
-		crtc->gamma_lut.value = 0;
-	if (crtc->background_color.pid)
-		crtc->background_color.value = 0;
+	struct atomictest_crtc *crtc;
+	for (uint32_t crtc_index = 0; crtc_index < ctx->num_crtcs; crtc_index++) {
+		if (!((1 << crtc_index) & crtc_mask))
+			continue;
 
-	set_crtc_props(crtc, ctx->pset);
+		crtc = &ctx->crtcs[crtc_index];
+		crtc->mode_id.value = 0;
+		crtc->active.value = 0;
+		if (crtc->ctm.pid)
+			crtc->ctm.value = 0;
+		if (crtc->gamma_lut.pid)
+			crtc->gamma_lut.value = 0;
+		if (crtc->background_color.pid)
+			crtc->background_color.value = 0;
+
+		set_crtc_props(crtc, ctx->pset);
+	}
+
 	int ret = drmModeAtomicCommit(ctx->fd, ctx->pset, DRM_MODE_ATOMIC_ALLOW_MODESET, NULL);
 	CHECK_RESULT(ret);
 	return ret;
+}
+
+static int disable_crtc(struct atomictest_context *ctx, struct atomictest_crtc *crtc)
+{
+	for (uint32_t i = 0; i < ctx->num_crtcs; i++)
+		if (&ctx->crtcs[i] == crtc)
+			return disable_crtcs(ctx, 1 << i);
+	CHECK(false);  // We shouldn't get here.
 }
 
 static struct atomictest_context *new_context(uint32_t num_connectors, uint32_t num_crtcs,
@@ -1685,6 +1703,8 @@ static int run_atomictest(const char *name, uint32_t crtc_mask, uint64_t modifie
 
 	ctx->modifier = modifier;
 	struct atomictest_crtc *crtc;
+	/* Disable all CRTCs first, in case there are any dangling connections. */
+	disable_crtcs(ctx, ~0);
 	for (uint32_t crtc_index = 0; crtc_index < ctx->num_crtcs; crtc_index++) {
 		crtc = &ctx->crtcs[crtc_index];
 		if (!((1 << crtc_index) & crtc_mask))
