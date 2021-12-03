@@ -531,6 +531,24 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	drmModeRes *res = drmModeGetResources(drm_device_fd);
+	if (!res) {
+		bs_debug_error("failed to get DRM resources");
+		return 1;
+	}
+	/* Disable all CRTCs first, in case there are dangling connections. */
+	for (int crtc_index = 0; crtc_index < res->count_crtcs; crtc_index++) {
+		int ret = drmModeSetCrtc(drm_device_fd, res->crtcs[crtc_index],
+					 0 /* bufferId */, 0 /* x */, 0 /* y */,
+					 NULL, 0 /* connector count */, NULL);
+		if (ret) {
+			bs_debug_error("failed to disable CRTC:%d: %s",
+				       res->crtcs[crtc_index], strerror(errno));
+			return 1;
+		}
+	}
+	drmModeFreeResources(res);
+
 	struct drm_set_client_cap cap = { DRM_CLIENT_CAP_ATOMIC, 1 };
 	bool has_atomic_capabilities = !drmIoctl(drm_device_fd, DRM_IOCTL_SET_CLIENT_CAP, &cap);
 	if (has_atomic_capabilities) {
