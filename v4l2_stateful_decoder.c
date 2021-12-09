@@ -1429,7 +1429,7 @@ int main(int argc, char* argv[]) {
   uint32_t uncompressed_fourcc = V4L2_PIX_FMT_INVALID;
   enum v4l2_memory CAPTURE_memory = V4L2_MEMORY_DMABUF;
 
-  while ((c = getopt_long(argc, argv, "wbdm:f:o:l:r:", longopts, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "f:m:wac:l:dr:", longopts, NULL)) != -1) {
     switch (c) {
       case 'f':
         file_name = strdup(optarg);
