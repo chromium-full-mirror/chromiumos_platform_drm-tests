@@ -483,10 +483,12 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
   uint32_t buffer_height = 0;
   size_t buffer_size = 0;
   uint8_t* buffer_nv12 = NULL;
+  int bo_fd = 0;
 
   if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
     struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
-    int bo_fd = gbm_bo_get_fd(bo);
+    bo_fd = gbm_bo_get_fd(bo);
+    assert(bo_fd > 0);
     buffer_size = lseek(bo_fd, 0, SEEK_END);
     lseek(bo_fd, 0, SEEK_SET);
 
@@ -518,8 +520,10 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
                                                 buffer_height,
                                                 buffer_nv12);
 
-  if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF)
+  if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
     munmap(buffer_nv12, buffer_size);
+    close(bo_fd);
+  }
 
   return buffer_i420;
 }
@@ -1110,7 +1114,14 @@ bool process_opaque_frame(struct queue* CAPTURE_queue,
           CAPTURE_queue->buffers[CAPTURE_queue_index].length[i];
       assert(v4l2_buffer.m.planes[i].data_offset == 0);
     }
+
     const int ret = ioctl(mdp_OUTPUT_queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
+
+    // VIDIOC_EXPBUF opens file descriptors that need to be closed.
+    for (int i = 0; i < mdp_OUTPUT_queue->num_planes; ++i) {
+      close(v4l2_buffer.m.planes[i].m.fd);
+    }
+
     if (ret != 0) {
       LOG_ERROR("Image Processor: mdp_OUTPUT_queue VIDIOC_QBUF failed: %s.",
           strerror(errno));
