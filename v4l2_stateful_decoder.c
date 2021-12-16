@@ -21,55 +21,13 @@
 #include <sys/mman.h>
 #include <unistd.h>
 
+#include "bitstreams/bitstream_helper.h"
 #include "bs_drm.h"
-
-#define FOURCC_SIZE 4
-
-enum logging_levels {
-  kLoggingDebug = -1,
-  kLoggingInfo = 0,
-  kLoggingError,
-  kLoggingFatal,
-  kLoggingLevelMax
-};
-
-#define DEFAULT_LOG_LEVEL kLoggingInfo
-
-#define LOG(level, stream, fmt, ...)       \
-  do {                                     \
-    if (level >= log_run_level) {          \
-      fprintf(stream, fmt, ##__VA_ARGS__); \
-      fprintf(stream, "\n");               \
-      fflush(stream);                      \
-    }                                      \
-  } while (0)
-
-#define LOG_DEBUG(fmt, ...) LOG(kLoggingDebug, stdout, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...) LOG(kLoggingInfo, stdout, fmt, ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) LOG(kLoggingError, stderr, fmt, ##__VA_ARGS__)
-#define LOG_FATAL(fmt, ...)                         \
-  do {                                              \
-    LOG(kLoggingFatal, stderr, fmt, ##__VA_ARGS__); \
-    exit(EXIT_FAILURE);                             \
-  } while (0)
-
-// TODO(frkoenig):
-// P010 had not landed as an official V4L2 format yet. Once it has remove this.
-#ifndef V4L2_PIX_FMT_P010
-#define V4L2_PIX_FMT_P010    v4l2_fourcc('P', '0', '1', '0') /* 15  Y/CbCr 4:2:0 10-bit per pixel*/
-#endif
-// Only available in kernels 5.4 and later.
-#ifndef V4L2_PIX_FMT_NV12_UBWC
-#define V4L2_PIX_FMT_NV12_UBWC v4l2_fourcc('Q', '1', '2', '8') /* UBWC 8-bit Y/CbCr 4:2:0  */
-#endif
-
-#define V4L2_PIX_FMT_INVALID 0
+#include "v4l2_macros.h"
 
 static const char* kDecodeDevice = "/dev/video-dec0";
 static const int kInputbufferMaxSize = 4 * 1024 * 1024;
 static const int kRequestBufferCount = 8;
-static const int kTimestampMarkerForShowFrames = 1;
-static const uint32_t kIVFHeaderSignature = v4l2_fourcc('D', 'K', 'I', 'F');
 static const uint32_t kInvalidFrameRate = 0;
 // |kMaxRetryCount = 2^24| takes around 20 seconds to exhaust all retries on
 // Trogdor when a decode stalls.
@@ -119,30 +77,6 @@ struct queue {
   bool is_streaming;
 };
 
-struct ivf_file_header {
-  uint32_t signature;
-  uint16_t version;
-  uint16_t header_length;
-  uint32_t fourcc;
-  uint16_t width;
-  uint16_t height;
-  uint32_t denominator;
-  uint32_t numerator;
-  uint32_t frame_cnt;
-  uint32_t unused;
-} __attribute__((packed));
-
-struct ivf_frame_header {
-  uint32_t size;
-  uint64_t timestamp;
-} __attribute__((packed));
-
-struct compressed_file {
-  FILE* fp;
-  bool is_at_end_of_file;
-  struct ivf_file_header header;
-};
-
 struct md5_hash {
   uint8_t bytes[16];
 };
@@ -165,37 +99,6 @@ char* fourcc_to_string(uint32_t fourcc, char* fourcc_string) {
           fourcc >> 16 & 0xff, fourcc >> 24 & 0xff);
   // Return the pointer for conveniency.
   return fourcc_string;
-}
-
-struct compressed_file open_file(const char* file_name) {
-  struct compressed_file file = {};
-
-  FILE* fp = fopen(file_name, "rb");
-  if (fp) {
-    if (fread(&file.header, sizeof(struct ivf_file_header), 1, fp) != 1) {
-      fclose(fp);
-      LOG_ERROR("Unable to read ivf file header.");
-    }
-
-    if (file.header.signature != kIVFHeaderSignature) {
-      fclose(fp);
-      LOG_ERROR("Incorrect header signature : 0x%0x != 0x%0x",
-                file.header.signature, kIVFHeaderSignature);
-    }
-
-    file.fp = fp;
-
-    char fourcc[FOURCC_SIZE + 1];
-    LOG_INFO("Ivf file format: %s",
-        fourcc_to_string(file.header.fourcc, fourcc));
-
-    LOG_INFO("Ivf file header: %d x %d", file.header.width, file.header.height);
-    LOG_INFO("Ivf file header: frame_cnt = %d", file.header.frame_cnt);
-  } else {
-    LOG_ERROR("Unable to open file: %s.", file_name);
-  }
-
-  return file;
 }
 
 // Verifies that |v4lfd| can be queried for capabilities, and prints them. If
@@ -600,32 +503,13 @@ int setup_OUTPUT(struct queue* OUTPUT_queue,
   return ret;
 }
 
-// Reads a frame from |file| and submits it to |OUTPUT_queue|.
-int submit_compressed_frame(struct compressed_file* file,
-                            struct queue* OUTPUT_queue,
-                            uint32_t queue_index) {
-  const uint32_t num = file->header.numerator;
-  const uint32_t den = file->header.denominator;
-
-  struct ivf_frame_header frame_header = {0};
-
-  if (fread(&frame_header, sizeof(struct ivf_frame_header), 1, file->fp) != 1) {
-    if (!feof(file->fp)) {
-      LOG_ERROR("Unable to read ivf frame header.");
-      return -1;
-    } else {
-      LOG_INFO("Unable to read ivf frame header, reached the end of ivf file.");
-      file->is_at_end_of_file = true;
-      return 0;
-    }
-  }
-
+// Reads parsed compressed frame data from |file_buf| and submits it to
+// |OUTPUT_queue|.
+int submit_compressed_data(struct queue* OUTPUT_queue, uint32_t queue_index) {
   struct mmap_buffers* buffers = OUTPUT_queue->buffers;
-  if (fread(buffers[queue_index].start[0], sizeof(uint8_t), frame_header.size,
-            file->fp) != frame_header.size) {
-    LOG_ERROR("Unable to read ivf frame data.");
-    return -1;
-  }
+  const size_t buf_size = fill_compressed_buffer(
+      buffers[queue_index].start[0], buffers[queue_index].length[0]);
+  assert(buf_size);
 
   struct v4l2_buffer v4l2_buffer;
   struct v4l2_plane planes[VIDEO_MAX_PLANES];
@@ -635,13 +519,9 @@ int submit_compressed_frame(struct compressed_file* file,
   v4l2_buffer.type = OUTPUT_queue->type;
   v4l2_buffer.memory = OUTPUT_queue->memory;
   v4l2_buffer.length = 1;
-  // Intentionally starting timestamp |kTimestampMarkerForShowFrames| at 1
-  // so that we can detect non-displayed frames with simpler logic.
-  v4l2_buffer.timestamp.tv_sec = kTimestampMarkerForShowFrames;
-  v4l2_buffer.timestamp.tv_usec = ((frame_header.timestamp * den) / num) * 100;
   v4l2_buffer.m.planes = planes;
   v4l2_buffer.m.planes[0].length = buffers[queue_index].length[0];
-  v4l2_buffer.m.planes[0].bytesused = frame_header.size;
+  v4l2_buffer.m.planes[0].bytesused = buf_size;
   v4l2_buffer.m.planes[0].data_offset = 0;
   int ret = ioctl(OUTPUT_queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
   if (ret != 0) {
@@ -652,13 +532,12 @@ int submit_compressed_frame(struct compressed_file* file,
   return 0;
 }
 
-int prime_OUTPUT(struct compressed_file* file,
-                 struct queue* OUTPUT_queue) {
+int prime_OUTPUT(struct queue* OUTPUT_queue) {
   int ret = 0;
 
   for (uint32_t i = 0; i < OUTPUT_queue->cnt; ++i) {
-    ret = submit_compressed_frame(file, OUTPUT_queue, i);
-    if (ret || file->is_at_end_of_file)
+    ret = submit_compressed_data(OUTPUT_queue, i);
+    if (ret || is_end_of_stream())
       break;
   }
   return ret;
@@ -1240,7 +1119,6 @@ int handle_dynamic_resolution_change(struct gbm_device* gbm,
 }
 
 int decode(struct gbm_device* gbm,
-           struct compressed_file* file,
            struct queue* CAPTURE_queue,
            struct queue* OUTPUT_queue,
            uint64_t modifier,
@@ -1377,14 +1255,14 @@ int decode(struct gbm_device* gbm,
       }
 
       if (OUTPUT_queue->is_streaming) {
-        ret = submit_compressed_frame(file, OUTPUT_queue, index);
+        ret = submit_compressed_data(OUTPUT_queue, index);
 
         // If there are no remaining frames, we should stop the OUTPUT queue.
         // Doing so, lets the decoder know it should process the remaining
         // buffers in the output queue, then dequeue a buffer with
         // V4L2_BUF_FLAG_LAST set. After that happens, the decode loop will
         // stop.
-        if (!ret && file->is_at_end_of_file)
+        if (!ret && is_end_of_stream())
           ret = initiate_drain(OUTPUT_queue);
       }
     }
@@ -1517,9 +1395,7 @@ int main(int argc, char* argv[]) {
     LOG_FATAL("Failed to create gbm device.");
   }
 
-  struct compressed_file compressed_file = open_file(file_name);
-  if (!compressed_file.fp)
-    LOG_FATAL("Unable to open ivf file: %s.", file_name);
+  init_bitstream(file_name);
 
   char* output_file_prefix = NULL;
   if (write_out) {
@@ -1532,15 +1408,13 @@ int main(int argc, char* argv[]) {
     LOG_FATAL("Unable to open device file: %s.", kDecodeDevice);
   query_driver(v4lfd);
 
-  if (!capabilities(v4lfd, kDecodeDevice, compressed_file.header.fourcc,
-      &uncompressed_fourcc)) {
+  if (!capabilities(v4lfd, kDecodeDevice, get_fourcc(), &uncompressed_fourcc))
     LOG_FATAL("Not enough capabilities present for decoding.");
-  }
   assert(uncompressed_fourcc != V4L2_PIX_FMT_INVALID);
 
   struct queue OUTPUT_queue = {.v4lfd = v4lfd,
                                .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-                               .fourcc = compressed_file.header.fourcc,
+                               .fourcc = get_fourcc(),
                                .num_planes = 1,
                                .memory = V4L2_MEMORY_MMAP,
                                .displayed_frames = 0,
@@ -1549,17 +1423,13 @@ int main(int argc, char* argv[]) {
        /*optional_height=*/NULL);
 
   if (!ret)
-    ret = prime_OUTPUT(&compressed_file, &OUTPUT_queue);
+    ret = prime_OUTPUT(&OUTPUT_queue);
 
   struct queue CAPTURE_queue = {.v4lfd = v4lfd,
                                 .type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                                 .fourcc = uncompressed_fourcc,
                                 .num_planes = 1,
                                 .memory = CAPTURE_memory,
-                                .display_area = {.left = 0,
-                                  .top = 0,
-                                  .width = compressed_file.header.width,
-                                  .height = compressed_file.header.height},
                                 .displayed_frames = 0,
                                 .is_streaming = false};
   if (!ret) {
@@ -1629,10 +1499,7 @@ int main(int argc, char* argv[]) {
     mdp_CAPTURE_queue->fourcc = readable_fourcc;
     mdp_CAPTURE_queue->num_planes = readable_fourcc_num_planes;
     mdp_CAPTURE_queue->memory = V4L2_MEMORY_MMAP;
-    mdp_CAPTURE_queue->display_area.left = 0;
-    mdp_CAPTURE_queue->display_area.top = 0;
-    mdp_CAPTURE_queue->display_area.width = compressed_file.header.width;
-    mdp_CAPTURE_queue->display_area.height = compressed_file.header.height;
+    mdp_CAPTURE_queue->display_area = CAPTURE_queue.display_area;
     mdp_CAPTURE_queue->displayed_frames = 0;
     mdp_CAPTURE_queue->is_streaming = false;
     ret = setup_CAPTURE(gbm, mdp_CAPTURE_queue, DRM_FORMAT_MOD_NONE,
@@ -1647,9 +1514,9 @@ int main(int argc, char* argv[]) {
     LOG_FATAL("Unable to subscribe to source change event.");
 
   if (!ret) {
-    ret = decode(gbm, &compressed_file, &CAPTURE_queue, &OUTPUT_queue, modifier,
-        output_file_prefix, frames_to_decode, print_md5hash,
-        process_opaque_frame_fp, mdp_OUTPUT_queue, mdp_CAPTURE_queue);
+    ret = decode(gbm, &CAPTURE_queue, &OUTPUT_queue, modifier,
+                 output_file_prefix, frames_to_decode, print_md5hash,
+                 process_opaque_frame_fp, mdp_OUTPUT_queue, mdp_CAPTURE_queue);
   }
 
   if (output_file_prefix)
@@ -1664,9 +1531,9 @@ int main(int argc, char* argv[]) {
   cleanup_queue(&OUTPUT_queue);
   cleanup_queue(&CAPTURE_queue);
   close(v4lfd);
-  fclose(compressed_file.fp);
   close(drm_device_fd);
   free(file_name);
+  cleanup_bitstream();
 
   return ret;
 }

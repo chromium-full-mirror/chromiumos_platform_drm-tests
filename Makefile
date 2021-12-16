@@ -14,6 +14,7 @@ PC_LIBS := $(shell $(PKG_CONFIG) --libs $(PC_DEPS))
 DRM_LIBS = -lGLESv2
 CFLAGS += $(PC_CFLAGS) -DEGL_EGLEXT_PROTOTYPES -DGL_GLEXT_PROTOTYPES
 CFLAGS += -D_FILE_OFFSET_BITS=64 -D_LARGEFILE_SOURCE -D_LARGEFILE64_SOURCE
+CFLAGS += -I$(SRC)
 LDLIBS += $(PC_LIBS)
 
 all: \
@@ -79,7 +80,12 @@ CC_BINARY(vk_glow): vk_glow.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
 CC_BINARY(vk_glow): LDLIBS += -lm -lvulkan $(DRM_LIBS)
 endif
 
-CC_BINARY(v4l2_stateful_decoder): v4l2_stateful_decoder.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
+v4l2_stateful_decoder.o: $(SRC)/v4l2_stateful_decoder.c
+v4l2_stateful_decoder.o: $(SRC)/bitstreams/bitstream_helper.h
+v4l2_stateful_decoder.o: $(SRC)/v4l2_macros.h
+CC_BINARY(v4l2_stateful_decoder): v4l2_stateful_decoder.o
+CC_BINARY(v4l2_stateful_decoder): CC_STATIC_LIBRARY(libbitstreams.pic.a)
+CC_BINARY(v4l2_stateful_decoder): CC_STATIC_LIBRARY(libbsdrm.pic.a)
 CC_BINARY(v4l2_stateful_decoder): LDLIBS += $(DRM_LIBS)
 CC_BINARY(v4l2_stateful_decoder): LDLIBS += -lssl -lcrypto
 
