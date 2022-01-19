@@ -33,6 +33,7 @@ static uint32_t allowed_formats[] = {
 
 
 static const struct option longopts[] = {
+	{ "crtc_index", required_argument, NULL, 'c' },
 	{ "format", required_argument, NULL, 'f' },
 	{ "modifier", required_argument, NULL, 'm' },
 	{ "test-page-flip-format-change", required_argument, NULL, 'p' },
@@ -123,6 +124,7 @@ static void print_help(const char *argv0, int drm_device_fd)
 	printf("  -m, --modifier <modifier>                    pass modifiers.\n");
 	printf("  -p, --test-page-flip-format-change <format>  test page flips alternating formats.\n");
 	printf("  -b, --banding                                show a pattern that makes banding easy to spot if present.\n");
+	printf("  -c, --crtc_index <crtc_index>                CRTC index to use.\n");
 	printf("  -h, --help                                   show help\n");
 	printf("  -d, --display <drm_driver_name>              dri driver name for display.\n");
 	printf("  -r, --renderer <drm_driver_name>             dri driver name for renderer.\n");
@@ -388,9 +390,10 @@ int main(int argc, char **argv)
 	bool banding_pattern = false;
 	char *display_driver = NULL;
 	char *render_driver = NULL;
+	int32_t crtc_idx = -1;
 
 	int c = -1;
-	while ((c = getopt_long(argc, argv, "m:hp:f:bld:r:", longopts, NULL)) != -1) {
+	while ((c = getopt_long(argc, argv, "c:m:hp:f:bld:r:", longopts, NULL)) != -1) {
 		switch (c) {
 			case 'p':
 				test_page_flip_format_change = find_format(optarg);
@@ -413,6 +416,12 @@ int main(int argc, char **argv)
 				break;
 			case 'b':
 				banding_pattern = true;
+				break;
+			case 'c':
+				if (sscanf(optarg, "%d", &crtc_idx) != 1) {
+					bs_debug_error("unsupported crtc index: %s", optarg);
+					help_flag = true;
+				}
 				break;
 			case 'h':
 				help_flag = true;
@@ -470,10 +479,15 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	if (!bs_drm_pipe_make(drm_device_fd, &drm_pipe)) {
+	struct bs_drm_pipe_plumber *plumber = bs_drm_pipe_plumber_new();
+	bs_drm_pipe_plumber_fd(plumber, drm_device_fd);
+	if (crtc_idx >= 0)
+		bs_drm_pipe_plumber_crtc_mask(plumber, 1 << crtc_idx);
+	if (!bs_drm_pipe_plumber_make(plumber, &drm_pipe)) {
 		bs_debug_error("failed to make drm_pipe");
 		return 1;
 	}
+	bs_drm_pipe_plumber_destroy(&plumber);
 
 	drmModeConnector *connector = drmModeGetConnector(drm_device_fd, drm_pipe.connector_id);
 	assert(connector);
