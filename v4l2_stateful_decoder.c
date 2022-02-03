@@ -509,7 +509,9 @@ int submit_compressed_data(struct queue* OUTPUT_queue, uint32_t queue_index) {
   struct mmap_buffers* buffers = OUTPUT_queue->buffers;
   const size_t buf_size = fill_compressed_buffer(
       buffers[queue_index].start[0], buffers[queue_index].length[0]);
-  assert(buf_size);
+
+  if (!buf_size)
+    return 0;
 
   struct v4l2_buffer v4l2_buffer;
   struct v4l2_plane planes[VIDEO_MAX_PLANES];
