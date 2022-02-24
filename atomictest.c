@@ -686,42 +686,6 @@ static uint32_t get_connection(struct atomictest_crtc *crtc, uint32_t crtc_index
 	return connector_id;
 }
 
-static int check_and_attach_primary_plane(struct atomictest_context *ctx, struct atomictest_crtc *crtc)
-{
-	int ret = 0;
-	struct atomictest_plane *primary;
-
-	for (uint32_t i = 0; i < crtc->num_primary; i++) {
-		primary = get_plane(crtc, i, DRM_PLANE_TYPE_PRIMARY);
-
-		if(primary->crtc_id.value == 0) {
-			CHECK_RESULT(init_plane_any_format(ctx, primary, 0, 0, crtc->width, crtc->height,
-								crtc->crtc_id, false));
-		} else {
-			bs_debug_error("Plane is already attached to CRTC");
-		}
-	}
-
-	return ret;
-}
-
-static void detach_primary_plane(struct atomictest_context *ctx, struct atomictest_plane **primary, uint32_t num_primary)
-{
-	for (uint32_t i = 0; i < num_primary; i++) {
-		if(primary[i]->crtc_id.value != 0)
-			disable_plane(ctx, primary[i]);
-	}
-}
-
-static void save_primary_plane_ctx(struct atomictest_crtc *crtc, struct atomictest_plane **primary)
-{
-	uint32_t num_planes = crtc->num_primary + crtc->num_cursor + crtc->num_overlay;
-	for (uint32_t i = 0, j = 0; i < num_planes; i++) {
-		if (crtc->planes[i].type.value == DRM_PLANE_TYPE_PRIMARY)
-			primary[j++] = &crtc->planes[i];
-	}
-}
-
 static int enable_crtc(struct atomictest_context *ctx, struct atomictest_crtc *crtc)
 {
 	drmModeAtomicSetCursor(ctx->pset, 0);
@@ -758,8 +722,6 @@ static int enable_crtc(struct atomictest_context *ctx, struct atomictest_crtc *c
 		crtc->active.value = 1;
 		crtc->width = mode->width;
 		crtc->height = mode->height;
-
-		check_and_attach_primary_plane(ctx, crtc);
 
 		set_crtc_props(crtc, ctx->pset);
 		ret = drmModeAtomicCommit(ctx->fd, ctx->pset,
@@ -805,22 +767,9 @@ static int disable_crtcs(struct atomictest_context *ctx, uint32_t crtc_mask)
 
 static int disable_crtc(struct atomictest_context *ctx, struct atomictest_crtc *crtc)
 {
-	int ret = -EINVAL;
-	uint32_t num_primary = crtc->num_primary;
-	struct atomictest_plane *primary[num_primary];
-
-	for (uint32_t i = 0; i < ctx->num_crtcs; i++) {
-		if (&ctx->crtcs[i] == crtc) {
-			/* disable_crtc also needs primary plane to be attached with CRTC otherwise drmModeAtomicCommit fails
-			 * Save the primary plane so that it can be disabled after disable_crtc
-			 */
-			save_primary_plane_ctx(crtc, primary);
-			ret = disable_crtcs(ctx, 1 << i);
-			// disable saved primary plane after CRTC is disabled
-			detach_primary_plane(ctx, primary, num_primary);
-			return ret;
-		}
-	}
+	for (uint32_t i = 0; i < ctx->num_crtcs; i++)
+		if (&ctx->crtcs[i] == crtc)
+			return disable_crtcs(ctx, 1 << i);
 	CHECK(false);  // We shouldn't get here.
 }
 
@@ -1042,6 +991,8 @@ static int test_multiple_planes(struct atomictest_context *ctx, struct atomictes
 		}
 
 		primary = get_plane(crtc, i, DRM_PLANE_TYPE_PRIMARY);
+		CHECK_RESULT(init_plane_any_format(ctx, primary, 0, 0, crtc->width, crtc->height,
+						   crtc->crtc_id, false));
 		CHECK_RESULT(draw_to_plane(ctx->mapper, primary, DRAW_ELLIPSE));
 
 		uint32_t num_planes = crtc->num_primary + crtc->num_cursor + crtc->num_overlay;
@@ -1059,6 +1010,15 @@ static int test_multiple_planes(struct atomictest_context *ctx, struct atomictes
 		}
 
 		ret |= test_and_commit(ctx, 1e6);
+
+		/* Disable primary plane and verify overlays show up. */
+		CHECK_RESULT(disable_plane(ctx, primary));
+		ret |= test_and_commit(ctx, 1e6);
+
+		for (uint32_t j = 0; j < crtc->num_cursor; j++) {
+			cursor = get_plane(crtc, j, DRM_PLANE_TYPE_CURSOR);
+			CHECK_RESULT(disable_plane(ctx, cursor));
+		}
 	}
 
 	return ret;
@@ -1694,11 +1654,8 @@ static int run_testcase(struct atomictest_context *ctx, struct atomictest_crtc *
 
 	int ret = func(ctx, crtc);
 
-	for (uint32_t i = 0; i < num_planes; i++) {
-		// Don't disable primary plane until CRTC is disabled
-		if (crtc->planes[i].type.value != DRM_PLANE_TYPE_PRIMARY)
-			disable_plane(ctx, &crtc->planes[i]);
-	}
+	for (uint32_t i = 0; i < num_planes; i++)
+		disable_plane(ctx, &crtc->planes[i]);
 
 	drmModeAtomicSetCursor(ctx->pset, cursor);
 
