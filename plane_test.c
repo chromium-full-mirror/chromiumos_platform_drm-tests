@@ -41,10 +41,25 @@ static bool is_format_supported(uint32_t format_count,
   return false;
 }
 
+enum plane_type { UNSPECIFIED = 0, PRIMARY, OVERLAY, CURSOR };
+
+static enum plane_type parse_type(const char* str) {
+  if (!strcasecmp(str, "primary")) {
+    return PRIMARY;
+  } else if (!strcasecmp(str, "overlay")) {
+    return OVERLAY;
+  } else if (!strcasecmp(str, "cursor")) {
+    return CURSOR;
+  }
+
+  return UNSPECIFIED;
+}
+
 static bool find_overlay_planes(int fd,
                                 uint32_t crtc_id,
                                 size_t plane_count,
                                 uint32_t* formats,
+                                enum plane_type* types,
                                 uint32_t* plane_ids) {
   drmModeRes* res = drmModeGetResources(fd);
   if (res == NULL) {
@@ -86,19 +101,7 @@ static bool find_overlay_planes(int fd,
       continue;
     }
 
-    size_t out_index;
-    for (out_index = 0; out_index < plane_count; out_index++) {
-      if (plane_ids[out_index] == 0 &&
-          is_format_supported(plane->count_formats, plane->formats,
-                              formats[out_index]))
-        break;
-    }
-
-    if ((plane->possible_crtcs & crtc_mask) == 0 || out_index == plane_count) {
-      drmModeFreePlane(plane);
-      continue;
-    }
-
+    enum plane_type current_type = UNSPECIFIED;
     drmModeObjectPropertiesPtr props =
         drmModeObjectGetProperties(fd, plane->plane_id, DRM_MODE_OBJECT_PLANE);
     for (uint32_t prop_index = 0; prop_index < props->count_props;
@@ -110,25 +113,34 @@ static bool find_overlay_planes(int fd,
         continue;
       }
 
-      uint64_t desired_value = 0;
-      bool has_value = false;
       for (int enum_index = 0; enum_index < prop->count_enums; enum_index++) {
         struct drm_mode_property_enum* penum = &prop->enums[enum_index];
-        if (!strcmp(penum->name, "Overlay")) {
-          desired_value = penum->value;
-          has_value = true;
-          break;
+        if (penum->value == props->prop_values[prop_index]) {
+          current_type = parse_type(penum->name);
+          if (current_type != UNSPECIFIED)
+            break;
         }
       }
       drmModeFreeProperty(prop);
-
-      if (has_value && desired_value == props->prop_values[prop_index]) {
-        plane_ids[out_index] = plane->plane_id;
-        remaining_out--;
-      }
-
       break;
     }
+
+    size_t out_index;
+    for (out_index = 0; out_index < plane_count; out_index++) {
+      if (plane_ids[out_index] == 0 &&
+          is_format_supported(plane->count_formats, plane->formats,
+                              formats[out_index]) &&
+          types[out_index] == current_type)
+        break;
+    }
+
+    if ((plane->possible_crtcs & crtc_mask) == 0 || out_index == plane_count) {
+      drmModeFreePlane(plane);
+      continue;
+    }
+
+    plane_ids[out_index] = plane->plane_id;
+    remaining_out--;
 
     drmModeFreeObjectProperties(props);
     drmModeFreePlane(plane);
@@ -142,6 +154,8 @@ static bool find_overlay_planes(int fd,
 
 struct test_plane {
   const struct bs_draw_format* format;
+
+  enum plane_type type; // Primary, overlay, cursor.
 
   bool has_bo_size;
   uint32_t bo_w;
@@ -313,6 +327,7 @@ static const struct option longopts[] = {
     {"crtc-mask", required_argument, NULL, 'm'},
     {"plane", no_argument, NULL, 'p'},
     {"format", required_argument, NULL, 'f'},
+    {"type", required_argument, NULL, 'y'},
     {"size", required_argument, NULL, 'z'},
     {"scale", required_argument, NULL, 'c'},
     {"translate", no_argument, NULL, 't'},
@@ -328,6 +343,8 @@ static void print_help(const char* argv0) {
   printf("  -m, --crtc-mask MASK      only use the selected CRTC mask (defaults to any CRTC)\n");
   printf("  -p, --plane               indicates that subsequent parameters are for a new plane\n");
   printf("  -f, --format FOURCC       format of source buffer (defaults to NV12)\n");
+  printf("  -y, --type TYPE           plane type (defaults to PRIMARY for first plane with unspecified\n");
+  printf("                            type and OVERLAY for all others)\n");
   printf("  -z, --size WIDTHxHEIGHT   size of the source buffer (defaults to screen size)\n");
   printf("  -c, --scale DOWN/UP       scale plane over time between (1/DOWN)x and UPx\n");
   printf("  -t, --translate           translate plane over time\n");
@@ -336,6 +353,7 @@ static void print_help(const char* argv0) {
   printf("  -h, --help                show help\n");
   printf("\n");
   printf("The format of RECT arguments is X,Y or X,Y,WIDTH,HEIGHT or WIDTHxHEIGHT.\n");
+  printf("The plane TYPE argument must be PRIMARY, OVERLAY, or CURSOR.\n");
   printf("To test more than one plane, separate plane arguments with -p. For example:\n");
   printf("  %s --format NV12 --size 400x400 -p --format XR24 --size 100x100 --translate\n", argv0);
   printf("\n");
@@ -347,12 +365,14 @@ int main(int argc, char** argv) {
   size_t test_planes_count = 1;
   struct test_plane test_planes[MAX_TEST_PLANES] = {{0}};
   uint32_t test_planes_formats[MAX_TEST_PLANES] = {0};
+  enum plane_type test_planes_types[MAX_TEST_PLANES] = {0};
   uint32_t test_planes_ids[MAX_TEST_PLANES] = {0};
   bool use_external_connectors = false;
   uint32_t crtc_mask = 0;
+  bool has_primary = false;
 
   int c;
-  while ((c = getopt_long(argc, argv, "em:pf:z:c:ts:d:h", longopts, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "em:pf:y:z:c:ts:d:h", longopts, NULL)) != -1) {
     struct test_plane* current_plane = &test_planes[test_planes_count - 1];
     switch (c) {
       case 'e':
@@ -372,6 +392,15 @@ int main(int argc, char** argv) {
       case 'f':
         if (!bs_parse_draw_format(optarg, &current_plane->format))
           return 1;
+        break;
+      case 'y':
+        current_plane->type = parse_type(optarg);
+        if (current_plane->type == UNSPECIFIED) {
+          printf("unrecognized plane type \"%s\"\n", optarg);
+          return 1;
+        }
+        if (current_plane->type == PRIMARY)
+          has_primary = true;
         break;
       case 'z':
         if (!parse_size(optarg, &current_plane->bo_w, &current_plane->bo_h))
@@ -489,6 +518,12 @@ int main(int argc, char** argv) {
 
     test_planes_formats[test_plane_index] = bs_get_pixel_format(tp->format);
 
+    if (tp->type == UNSPECIFIED) {
+      tp->type = has_primary ? OVERLAY : PRIMARY;
+      has_primary = true;
+    }
+    test_planes_types[test_plane_index] = tp->type;
+
     if (!tp->has_bo_size) {
       tp->bo_w = mode.hdisplay;
       tp->bo_h = mode.vdisplay;
@@ -544,7 +579,8 @@ int main(int argc, char** argv) {
   }
 
   if (!find_overlay_planes(pipe.fd, pipe.crtc_id, test_planes_count,
-                           test_planes_formats, test_planes_ids)) {
+                           test_planes_formats, test_planes_types,
+                           test_planes_ids)) {
     bs_debug_error("failed to find overlay planes for given formats");
     return 1;
   }
