@@ -8,38 +8,10 @@
 #define V4L2_MACROS_H
 
 #include <linux/videodev2.h>
-#include <stdio.h>
-#include <stdlib.h>
+
+#include "logging.h"
 
 #define FOURCC_SIZE 4
-
-enum logging_levels {
-  kLoggingDebug = -1,
-  kLoggingInfo = 0,
-  kLoggingError,
-  kLoggingFatal,
-  kLoggingLevelMax
-};
-
-#define DEFAULT_LOG_LEVEL kLoggingInfo
-
-#define LOG(level, stream, fmt, ...)       \
-  do {                                     \
-    if (level >= DEFAULT_LOG_LEVEL) {      \
-      fprintf(stream, fmt, ##__VA_ARGS__); \
-      fprintf(stream, "\n");               \
-      fflush(stream);                      \
-    }                                      \
-  } while (0)
-
-#define LOG_DEBUG(fmt, ...) LOG(kLoggingDebug, stderr, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...) LOG(kLoggingInfo, stderr, fmt, ##__VA_ARGS__)
-#define LOG_ERROR(fmt, ...) LOG(kLoggingError, stderr, fmt, ##__VA_ARGS__)
-#define LOG_FATAL(fmt, ...)                         \
-  do {                                              \
-    LOG(kLoggingFatal, stderr, fmt, ##__VA_ARGS__); \
-    exit(EXIT_FAILURE);                             \
-  } while (0)
 
 // TODO(frkoenig):
 // P010 had not landed as an official V4L2 format yet. Once it has remove this.

@@ -22,6 +22,7 @@ all: \
 	CC_BINARY(drm_cursor_test) \
 	CC_BINARY(gamma_test) \
 	CC_BINARY(linear_bo_test) \
+	CC_BINARY(mali_stats) \
 	CC_BINARY(mapped_access_perf_test) \
 	CC_BINARY(mapped_texture_test) \
 	CC_BINARY(mmap_test) \
@@ -82,12 +83,16 @@ endif
 
 v4l2_stateful_decoder.o: $(SRC)/v4l2_stateful_decoder.c
 v4l2_stateful_decoder.o: $(SRC)/bitstreams/bitstream_helper.h
-v4l2_stateful_decoder.o: $(SRC)/v4l2_macros.h
+v4l2_stateful_decoder.o: $(SRC)/v4l2_macros.h $(SRC)/logging.h
 CC_BINARY(v4l2_stateful_decoder): v4l2_stateful_decoder.o
 CC_BINARY(v4l2_stateful_decoder): CC_STATIC_LIBRARY(libbitstreams.pic.a)
 CC_BINARY(v4l2_stateful_decoder): CC_STATIC_LIBRARY(libbsdrm.pic.a)
 CC_BINARY(v4l2_stateful_decoder): LDLIBS += $(DRM_LIBS)
 CC_BINARY(v4l2_stateful_decoder): LDLIBS += -lssl -lcrypto
+
+CC_BINARY(mali_stats): mali_stats.o
+CC_BINARY(mali_stats): $(SRC)/logging.h $(SRC)/mali/mali_ioctl.h
+CC_BINARY(mali_stats): CC_STATIC_LIBRARY(libmali.pic.a)
 
 CC_BINARY(v4l2_stateful_encoder): v4l2_stateful_encoder.o
 ifeq ($(USE_V4LPLUGIN),1)
