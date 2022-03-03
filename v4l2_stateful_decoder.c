@@ -1163,85 +1163,84 @@ int decode(struct gbm_device* gbm,
           break;
         }
         num_tries--;
-        continue;
-      }
-      // Successfully dequeued a buffer. Reset the |num_tries| counter.
-      num_tries = kMaxRetryCount;
+      } else {
+        // Successfully dequeued a buffer. Reset the |num_tries| counter.
+        num_tries = kMaxRetryCount;
 
-      const bool is_flag_error_set = (flags & V4L2_BUF_FLAG_ERROR) != 0;
-      const bool is_flag_last_set = (flags & V4L2_BUF_FLAG_LAST) != 0;
-      if (is_flag_last_set)
-        CAPTURE_queue->is_streaming = false;
+        const bool is_flag_error_set = (flags & V4L2_BUF_FLAG_ERROR) != 0;
+        const bool is_flag_last_set = (flags & V4L2_BUF_FLAG_LAST) != 0;
+        if (is_flag_last_set)
+          CAPTURE_queue->is_streaming = false;
 
-      // Don't use a buffer flagged with V4L2_BUF_FLAG_ERROR regardless of
-      // |bytesused| or with V4L2_BUF_FLAG_LAST and |bytesused| == 0
-      const bool ignore_buffer = is_flag_error_set ||
-        (is_flag_last_set && (bytesused == 0));
-      if (!ignore_buffer &&
-          CAPTURE_queue->displayed_frames < frames_to_decode) {
-        CAPTURE_queue->displayed_frames++;
+        // Don't use a buffer flagged with V4L2_BUF_FLAG_ERROR regardless of
+        // |bytesused| or with V4L2_BUF_FLAG_LAST and |bytesused| == 0
+        const bool ignore_buffer = is_flag_error_set ||
+          (is_flag_last_set && (bytesused == 0));
+        if (!ignore_buffer &&
+            CAPTURE_queue->displayed_frames < frames_to_decode) {
+          CAPTURE_queue->displayed_frames++;
 
-        if (process_opaque_frame_fp) {
-          int mdp_CAPTURE_queue_buffer_index = kInvalidBufferIndex;
-          assert(V4L2_MEMORY_MMAP == CAPTURE_queue->memory);
-          if (!process_opaque_frame_fp(CAPTURE_queue,
-                                       index,
-                                       mdp_OUTPUT_queue,
-                                       mdp_CAPTURE_queue,
-                                       &mdp_CAPTURE_queue_buffer_index)){
-            LOG_ERROR("Image Processor failed.");
-            return -1;
-          }
-          mdp_CAPTURE_queue->displayed_frames++;
-          if (output_file_prefix &&
-              mdp_CAPTURE_queue_buffer_index != kInvalidBufferIndex) {
-            write_frame_to_disk(output_file_prefix, mdp_CAPTURE_queue,
-                                mdp_CAPTURE_queue_buffer_index);
-          }
+          if (process_opaque_frame_fp) {
+            int mdp_CAPTURE_queue_buffer_index = kInvalidBufferIndex;
+            assert(V4L2_MEMORY_MMAP == CAPTURE_queue->memory);
+            if (!process_opaque_frame_fp(CAPTURE_queue,
+                                        index,
+                                        mdp_OUTPUT_queue,
+                                        mdp_CAPTURE_queue,
+                                        &mdp_CAPTURE_queue_buffer_index)){
+              LOG_ERROR("Image Processor failed.");
+              return -1;
+            }
+            mdp_CAPTURE_queue->displayed_frames++;
+            if (output_file_prefix &&
+                mdp_CAPTURE_queue_buffer_index != kInvalidBufferIndex) {
+              write_frame_to_disk(output_file_prefix, mdp_CAPTURE_queue,
+                                  mdp_CAPTURE_queue_buffer_index);
+            }
 
-          if (print_md5hash &&
-              mdp_CAPTURE_queue_buffer_index != kInvalidBufferIndex) {
-            compute_and_print_md5hash(
-                mdp_CAPTURE_queue->buffers[mdp_CAPTURE_queue_buffer_index]
-                    .start[0],
-                mdp_CAPTURE_queue->buffers[mdp_CAPTURE_queue_buffer_index]
-                    .length[0],
-                CAPTURE_queue->displayed_frames);
+            if (print_md5hash &&
+                mdp_CAPTURE_queue_buffer_index != kInvalidBufferIndex) {
+              compute_and_print_md5hash(
+                  mdp_CAPTURE_queue->buffers[mdp_CAPTURE_queue_buffer_index]
+                      .start[0],
+                  mdp_CAPTURE_queue->buffers[mdp_CAPTURE_queue_buffer_index]
+                      .length[0],
+                  CAPTURE_queue->displayed_frames);
+            }
+          } else {
+            if (output_file_prefix)
+              write_frame_to_disk(output_file_prefix, CAPTURE_queue, index);
+
+            if (print_md5hash)
+              map_buffers_and_calculate_md5hash(CAPTURE_queue, index);
           }
         } else {
-          if (output_file_prefix)
-            write_frame_to_disk(output_file_prefix, CAPTURE_queue, index);
-
-          if (print_md5hash)
-            map_buffers_and_calculate_md5hash(CAPTURE_queue, index);
+          LOG_DEBUG("Buffer set %s%s%s.",
+                    is_flag_error_set ? "V4L2_BUF_FLAG_ERROR" : "",
+                    (is_flag_error_set && is_flag_last_set) ? " and " : "",
+                    is_flag_last_set ? "V4L2_BUF_FLAG_LAST" : "");
         }
-      } else {
-        LOG_DEBUG("Buffer set %s%s%s.",
-                  is_flag_error_set ? "V4L2_BUF_FLAG_ERROR" : "",
-                  (is_flag_error_set && is_flag_last_set) ? " and " : "",
-                  is_flag_last_set ? "V4L2_BUF_FLAG_LAST" : "");
-      }
 
-      // When the device has decoded |frames_to_decode| displayable frames,
-      // start the drain sequence.
-      if (!ret && OUTPUT_queue->is_streaming &&
-          CAPTURE_queue->displayed_frames >= frames_to_decode) {
-        ret = initiate_drain(OUTPUT_queue);
-      }
+        // When the device has decoded |frames_to_decode| displayable frames,
+        // start the drain sequence.
+        if (!ret && OUTPUT_queue->is_streaming &&
+            CAPTURE_queue->displayed_frames >= frames_to_decode) {
+          ret = initiate_drain(OUTPUT_queue);
+        }
 
-      // Done with buffer, queue it back up unless we got V4L2_BUF_FLAG_LAST
-      if (!ret && !is_flag_last_set)
-        ret = queue_buffer_CAPTURE(CAPTURE_queue, index);
+        // Done with buffer, queue it back up unless we got V4L2_BUF_FLAG_LAST
+        if (!ret && !is_flag_last_set)
+          ret = queue_buffer_CAPTURE(CAPTURE_queue, index);
 
-      if (!ret && pending_dynamic_resolution_change && is_flag_last_set) {
-        LOG_DEBUG("Handling dynamic resolution change.");
-        pending_dynamic_resolution_change = false;
-        ret = handle_dynamic_resolution_change(gbm, CAPTURE_queue, modifier);
+        if (!ret && pending_dynamic_resolution_change && is_flag_last_set) {
+          LOG_DEBUG("Handling dynamic resolution change.");
+          pending_dynamic_resolution_change = false;
+          ret = handle_dynamic_resolution_change(gbm, CAPTURE_queue, modifier);
+        }
       }
     }
 
-    // A frame was recieved on the CAPTURE queue, that means there should
-    // now be a free OUTPUT buffer.
+    // Check the OUTPUT queue for free buffers and fill accordingly.
     if (!ret) {
       uint32_t index = 0;
       const int ret_dequeue = dequeue_buffer(OUTPUT_queue, &index, NULL,
