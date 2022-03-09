@@ -24,7 +24,7 @@
 
 int num_shader_cores;
 int num_l2_caches;
-MaliGpuModel model;
+MaliGpuModel curr_model;
 
 int gpufd = -1;
 int reader_fd = -1;
@@ -32,7 +32,8 @@ int reader_fd = -1;
 struct kbase_hwcnt_reader_metadata reader_metadata;
 
 // The model logic here is also taken from gfx-pps.
-void populate_model(int product_id) {
+MaliGpuModel get_model_from_product_id(int product_id) {
+  MaliGpuModel model;
   int masked_product_id = product_id & 0xF00F;
   switch (product_id) {
     case 0x6956:
@@ -91,11 +92,13 @@ void populate_model(int product_id) {
       }
       break;
   }
+
+  return model;
 }
 
 void initialize_mali_perf_reader() {
   int product_id = get_gpu_prop(gpu_prop_product_id);
-  populate_model(product_id);
+  curr_model = get_model_from_product_id(product_id);
   num_shader_cores =
       __builtin_popcount(get_gpu_prop(gpu_prop_shader_present_mask));
   num_l2_caches = get_gpu_prop(gpu_prop_num_l2);
@@ -148,7 +151,7 @@ struct mali_counter_values get_counter_values_from_dump(
   struct mali_counter_values ret;
   memset(&ret, 0, sizeof(struct mali_counter_values));
 
-  if (counter >> 8 != model) {
+  if (counter >> 8 != curr_model) {
     LOG_ERROR("Error: counter is of incorrect model type!\n");
     return ret;
   }
@@ -207,10 +210,12 @@ size_t get_dump_size_bytes() {
   return ret;
 }
 
-void initiate_dump() {
+void reset_perf_metrics() {
   if (ioctl(reader_fd, KBASE_HWCNT_READER_CLEAR, NULL) < 0)
     LOG_ERROR("Error clearing dump buffer! %s\n", strerror(errno));
+}
 
+void initiate_dump() {
   if (ioctl(reader_fd, KBASE_HWCNT_READER_DUMP, NULL) < 0)
     LOG_ERROR("Error dumping performance metrics! %s\n", strerror(errno));
 }

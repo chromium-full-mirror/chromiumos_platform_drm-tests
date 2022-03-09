@@ -7,5 +7,6 @@ include common.mk
 CFLAGS += -std=gnu99 -I$(SRC)
 
 CC_STATIC_LIBRARY(libmali.pic.a): \
+ mali/mali_counters.o \
  mali/mali_gpu_props.o \
  mali/mali_gpu_perf_metrics.o
