@@ -18,7 +18,7 @@ H264PPS curr_pps;
 H264SliceHeader curr_slice_header;
 
 // Outlined in section 9.1 of the ITU-T H.264.
-void read_exp_golomb_unsigned_int(BitfieldStream *bfs, int* ret) {
+static void read_exp_golomb_unsigned_int(BitfieldStream *bfs, int* ret) {
   int leading_zero_bits = -1;
   uint8_t bit = 0;
   while (!bit) {
@@ -37,7 +37,7 @@ void read_exp_golomb_unsigned_int(BitfieldStream *bfs, int* ret) {
 }
 
 // 9.1.1
-void read_exp_golomb_signed_int(BitfieldStream *bfs, int* ret) {
+static void read_exp_golomb_signed_int(BitfieldStream *bfs, int* ret) {
   read_exp_golomb_unsigned_int(bfs, ret);
 
   if (*ret & 1)
@@ -46,8 +46,8 @@ void read_exp_golomb_signed_int(BitfieldStream *bfs, int* ret) {
     *ret = -1 * (*ret >> 1);
 }
 
-void parse_scaling_list(BitfieldStream* bfs, int size,
-                        int* scaling_list, bool* use_default) {
+static void parse_scaling_list(BitfieldStream* bfs, int size,
+                               int* scaling_list, bool* use_default) {
   // 7.3.2.1.1.1
   int last_scale = 8;
   int next_scale = 8;
@@ -73,7 +73,7 @@ void parse_scaling_list(BitfieldStream* bfs, int size,
   }
 }
 
-void parse_scaling_list_sps(BitfieldStream* bfs, H264SPS* sps) {
+static void parse_scaling_list_sps(BitfieldStream* bfs, H264SPS* sps) {
   // See 7.4.2.1.1.
   bool seq_scaling_list_present_flag;
   bool use_default;
@@ -105,7 +105,7 @@ void parse_scaling_list_sps(BitfieldStream* bfs, H264SPS* sps) {
 // ITU-T H.264 section 7.3.2.1.1 Sequence parameter set data. Note that
 // this is not a full implementation, just enough for us to detect frame
 // boundaries.
-void parse_sps(BitfieldStream* bfs, H264Nalu* nalu) {
+static void parse_sps(BitfieldStream* bfs, H264Nalu* nalu) {
   H264SPS* sps = &curr_sps;
   memset(sps, 0, sizeof(H264SPS));
 
@@ -189,7 +189,7 @@ void parse_sps(BitfieldStream* bfs, H264Nalu* nalu) {
 
 // ITU-T H.264 section 7.3.2.2 Picture parameter set RBSP syntax. Note that
 // this is not a full implementation, just enough for frame boundaries.
-void parse_pps(BitfieldStream* bfs, H264Nalu* nalu) {
+static void parse_pps(BitfieldStream* bfs, H264Nalu* nalu) {
   H264PPS* pps = &curr_pps;
   memset(pps, 0, sizeof(H264PPS));
 
@@ -203,7 +203,7 @@ void parse_pps(BitfieldStream* bfs, H264Nalu* nalu) {
 
 // ITU-T H.264 section 7.3.3 Slice header syntax. Note that this is not a full
 // implementation, just enough for frame boundaries.
-void parse_slice_header(BitfieldStream* bfs, H264Nalu* nalu) {
+static void parse_slice_header(BitfieldStream* bfs, H264Nalu* nalu) {
   H264SliceHeader* slice_header = &curr_slice_header;
   memset(slice_header, 0, sizeof(H264SliceHeader));
 

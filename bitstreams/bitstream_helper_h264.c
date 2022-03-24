@@ -41,10 +41,10 @@ bool is_end_of_stream_h264(void) {
 }
 
 // ITU-T H.264 7.4.1.2.4 implementation. Assumes non-interlaced.
-bool is_new_frame(H264SPS* sps,
-                  H264PPS* pps,
-                  H264SliceHeader* prev_slice_header,
-                  H264SliceHeader* curr_slice_header) {
+static bool is_new_frame(H264SPS* sps,
+                         H264PPS* pps,
+                         H264SliceHeader* prev_slice_header,
+                         H264SliceHeader* curr_slice_header) {
   if (curr_slice_header->frame_num != prev_slice_header->frame_num ||
       curr_slice_header->pic_parameter_set_id != pps->pic_parameter_set_id ||
       curr_slice_header->nal_ref_idc != prev_slice_header->nal_ref_idc ||
