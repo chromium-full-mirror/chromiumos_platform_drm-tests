@@ -11,5 +11,7 @@ CC_STATIC_LIBRARY(libbitstreams.pic.a): \
   bitstreams/bitstream_helper.o \
   bitstreams/bitstream_helper_ivf.o \
   bitstreams/bitstream_helper_h264.o \
+  bitstreams/bitstream_helper_h265.o \
   bitstreams/h264_partial_parser.o \
+  bitstreams/h265_partial_parser.o \
   bitstreams/nalu_parser.o \

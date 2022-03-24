@@ -10,6 +10,7 @@
 #include <sys/mman.h>
 
 #include "bitstreams/bitstream_helper_h264.h"
+#include "bitstreams/bitstream_helper_h265.h"
 #include "bitstreams/bitstream_helper_ivf.h"
 #include "v4l2_macros.h"
 
@@ -45,6 +46,14 @@ bool init_bitstream(char* filename) {
     get_fourcc = get_fourcc_h264;
     is_end_of_stream = is_end_of_stream_h264;
     fill_compressed_buffer = fill_compressed_buffer_h264;
+
+    return true;
+  } else if (init_bitstream_h265()) {
+    LOG_INFO("Initializing H265 bitstream");
+
+    get_fourcc = get_fourcc_h265;
+    is_end_of_stream = is_end_of_stream_h265;
+    fill_compressed_buffer = fill_compressed_buffer_h265;
 
     return true;
   } else if (init_bitstream_ivf()) {
