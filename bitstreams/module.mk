@@ -7,6 +7,7 @@ include common.mk
 CFLAGS += -std=gnu99 -I$(SRC)
 
 CC_STATIC_LIBRARY(libbitstreams.pic.a): \
+  bitstreams/bitfield_stream.o \
   bitstreams/bitstream_helper.o \
   bitstreams/bitstream_helper_ivf.o \
   bitstreams/bitstream_helper_h264.o \
