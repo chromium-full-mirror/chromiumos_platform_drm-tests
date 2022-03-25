@@ -131,8 +131,6 @@ extern H264SPS curr_sps;
 extern H264PPS curr_pps;
 extern H264SliceHeader curr_slice_header;
 
-uint8_t* find_next_nalu(uint8_t* start_pos, uint8_t* end_pos);
-
 H264Nalu parse_h264_nalu(uint8_t* curr_pos, uint8_t* end_pos);
 
 #endif

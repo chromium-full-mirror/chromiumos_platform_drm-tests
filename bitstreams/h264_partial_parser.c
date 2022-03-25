@@ -5,18 +5,13 @@
  */
 #include "bitstreams/h264_partial_parser.h"
 #include "bitstreams/bitfield_stream.h"
+#include "bitstreams/nalu_parser.h"
 
 #include <assert.h>
 #include <string.h>
 
 #include "bitstream_helper.h"
 #include "v4l2_macros.h"
-
-// TODO: This assumes little-endianness. Consider replacing with something more
-// portable.
-static const uint32_t kNaluSignature = 0x00010000;
-static const uint32_t kNaluSignatureMask = 0x00FFFFFF;
-static const uint32_t kNaluSignatureSize = 3;
 
 H264SPS curr_sps;
 H264PPS curr_pps;
@@ -49,21 +44,6 @@ void read_exp_golomb_signed_int(BitfieldStream *bfs, int* ret) {
     *ret = (*ret >> 1) + 1;
   else
     *ret = -1 * (*ret >> 1);
-}
-
-uint8_t* find_next_nalu(uint8_t* start_pos, uint8_t* end_pos) {
-  uint8_t* next_nalu_pos = start_pos;
-  while (next_nalu_pos < end_pos &&
-         (*(uint32_t*)next_nalu_pos & kNaluSignatureMask) != kNaluSignature) {
-    next_nalu_pos++;
-  }
-  return next_nalu_pos;
-}
-
-void tokenize_nalu(uint8_t* curr_pos, uint8_t* end_pos, H264Nalu* nalu) {
-  nalu->data = curr_pos;
-  nalu->size = (size_t)(find_next_nalu(curr_pos + kNaluSignatureSize, end_pos) -
-                        curr_pos);
 }
 
 void parse_scaling_list(BitfieldStream* bfs, int size,
@@ -269,12 +249,12 @@ void parse_slice_header(BitfieldStream* bfs, H264Nalu* nalu) {
 }
 
 H264Nalu parse_h264_nalu(uint8_t* curr_pos, uint8_t* end_pos) {
-  H264Nalu nalu;
-  memset(&nalu, 0, sizeof(H264Nalu));
+  const Nalu base_nalu = tokenize_nalu(curr_pos, end_pos);
 
-  tokenize_nalu(curr_pos, end_pos, &nalu);
+  H264Nalu nalu = {.data=base_nalu.data,
+                   .size=base_nalu.size};
 
-  BitfieldStream bfs = bitfield_stream_init(nalu.data + kNaluSignatureSize,
+  BitfieldStream bfs = bitfield_stream_init(nalu.data + NALU_SIGNATURE_SIZE,
                                             nalu.data + nalu.size);
 
   bitfield_stream_skip_bits(&bfs, 1);

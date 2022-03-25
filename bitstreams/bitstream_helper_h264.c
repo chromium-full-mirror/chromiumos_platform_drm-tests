@@ -12,6 +12,7 @@
 
 #include "bitstreams/bitstream_helper.h"
 #include "bitstreams/h264_partial_parser.h"
+#include "bitstreams/nalu_parser.h"
 #include "v4l2_macros.h"
 
 static const uint32_t kH264Fourcc = v4l2_fourcc('H', '2', '6', '4');
@@ -23,8 +24,8 @@ size_t prev_slice_size = 0;
 bool init_bitstream_h264(void) {
   // Sometimes H.264 NALU streams are padded with a leading byte, sometimes
   // they are not.
-  uint8_t* first_nalu = find_next_nalu(file_buf, file_buf + 2);
-  if (first_nalu == file_buf + 2)
+  uint8_t* first_nalu = find_next_nalu(file_buf, file_buf + 3);
+  if (NULL == first_nalu)
     return false;
 
   curr_pos = first_nalu - file_buf;
