@@ -316,6 +316,8 @@ struct data_buffer nv12_to_i420(struct v4l2_rect display_area,
   // Both NV12 and I420 are 4:2:0, so the U and V planes are downsampled by a
   // factor of two in width and height respective to the Y plane.
   // When an image dimension is odd, round the downsampled dimension up.
+  const size_t u_plane_left = display_area.left / 2;
+  const size_t u_plane_top = display_area.top / 2;
   const size_t u_plane_width = (display_area.width + 1) / 2;
   const size_t u_plane_height = (display_area.height + 1) / 2;
   const size_t u_plane_size = u_plane_width * u_plane_height;
@@ -342,12 +344,12 @@ struct data_buffer nv12_to_i420(struct v4l2_rect display_area,
   for (int row = 0; row < u_plane_height; ++row) {
     for (int column = 0; column < u_plane_width; ++column) {
       *(u_plane_out + row * u_plane_width + column) =
-          buffer_in[uv_plane_offset + (display_area.top + row) * buffer_width +
-          2 * (display_area.left + column)];
+          buffer_in[uv_plane_offset + (u_plane_top + row) * buffer_width +
+          2 * (u_plane_left + column)];
 
       *(v_plane_out + row * u_plane_width + column) =
-          buffer_in[uv_plane_offset + (display_area.top + row) * buffer_width +
-          2 * (display_area.left + column) + 1];
+          buffer_in[uv_plane_offset + (u_plane_top + row) * buffer_width +
+          2 * (u_plane_left + column) + 1];
     }
   }
 
