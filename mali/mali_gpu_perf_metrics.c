@@ -119,7 +119,11 @@ void initialize_mali_perf_reader() {
     LOG_FATAL("Error initializing GPU context! %s\n", strerror(errno));
 
   struct kbase_ioctl_hwcnt_reader_setup reader_setup;
-  reader_setup.num_buffers = 2;
+  // Note: we don't actually ever use more than 1 buffer, but we need the total
+  // memory size to be at least 1 page or we trigger a bug in the Midgard
+  // drivers where mmap thinks we passed in a |length| that was too long,
+  // because it rounds |length| up to the nearest page.
+  reader_setup.num_buffers = 16;
   reader_setup.job_manager_mask = 0xFFFFFFFF;
   reader_setup.shader_mask = 0xFFFFFFFF;
   reader_setup.tiler_mask = 0xFFFFFFFF;

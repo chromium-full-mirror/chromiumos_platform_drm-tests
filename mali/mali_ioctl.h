@@ -77,7 +77,7 @@ struct kbase_hwcnt_reader_metadata {
 };
 
 #define SUPPORTED_MAJOR_VERSION 11
-#define SUPPORTED_MINOR_VERSION 21
+#define SUPPORTED_MINOR_VERSION 11
 #define SUPPORTED_API_VERSION 1
 #define SUPPORTED_HW_VERSION 5
 
