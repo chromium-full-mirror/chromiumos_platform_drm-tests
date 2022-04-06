@@ -48,6 +48,7 @@ bool init_bitstream(char* filename) {
 
     return true;
   } else if (init_bitstream_ivf()) {
+    LOG_INFO("Initializing VP8/VP9 bitstream");
     get_fourcc = get_fourcc_ivf;
     is_end_of_stream = is_end_of_stream_ivf;
     fill_compressed_buffer = fill_compressed_buffer_ivf;
