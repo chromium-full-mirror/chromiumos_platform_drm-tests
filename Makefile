@@ -19,6 +19,7 @@ LDLIBS += $(PC_LIBS)
 
 all: \
 	CC_BINARY(atomictest) \
+	CC_BINARY(mtk_dram_tool) \
 	CC_BINARY(drm_cursor_test) \
 	CC_BINARY(gamma_test) \
 	CC_BINARY(linear_bo_test) \
@@ -42,6 +43,8 @@ all: CC_BINARY(vk_glow)
 endif
 
 CC_BINARY(drm_cursor_test): drm_cursor_test.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
+
+CC_BINARY(mtk_dram_tool): mtk_dram_tool.o
 
 CC_BINARY(null_platform_test): null_platform_test.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
 CC_BINARY(null_platform_test): LDLIBS += $(DRM_LIBS)
