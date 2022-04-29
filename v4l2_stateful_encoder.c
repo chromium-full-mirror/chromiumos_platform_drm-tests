@@ -43,6 +43,16 @@ int do_ioctl(int fd, int request, void* data) {
 #endif
 }
 
+struct file_buffer {
+  uint8_t* buffer;
+  uint32_t frame_size;
+};
+
+struct file_info {
+  FILE* fp;
+  uint32_t format;
+};
+
 struct mmap_buffers {
   void* start[VIDEO_MAX_PLANES];
   size_t length[VIDEO_MAX_PLANES];
@@ -194,8 +204,12 @@ int queue_OUTPUT_buffer(struct queue* queue,
   return 0;
 }
 
-// This function copies the contents pointed by |fp| tp |queue|s |index| buffer.
-int submit_raw_frame_in_bulk(FILE* fp, struct queue* queue, uint32_t index) {
+// This function copies the contents pointed by |frame_buffer|
+// to |queue|s |index| buffer.  Handle the case where the format
+// of the file on disk is the same as the encoding format.
+int submit_raw_frame_in_bulk(const uint8_t* frame_buffer,
+                             struct queue* queue,
+                             uint32_t index) {
   assert(queue->num_planes == 1 || queue->num_planes == 2);
   assert(queue->raw_width == queue->encoded_width);
   // TODO: the code below assumes NV12 because the Chroma planes are copied in
@@ -204,32 +218,28 @@ int submit_raw_frame_in_bulk(FILE* fp, struct queue* queue, uint32_t index) {
 
   struct mmap_buffers* buffers = queue->buffers;
 
-  // read y plane first
-  size_t frame_size = queue->raw_width * queue->raw_height;
+  // Read luma plane first.
+  const size_t luma_plane_size = queue->raw_width * queue->raw_height;
   uint8_t* buffer = buffers[index].start[0];
+  memcpy(buffer, frame_buffer, luma_plane_size);
 
-  if (fread(buffer, frame_size, 1, fp) != 1) {
-    fprintf(stderr, "unable to read luma frame\n");
-    return -1;
-  }
-
-  // now read uv
-  frame_size >>= 1;
+  // Now read both chroma planes together.
   if (queue->num_planes == 2)
     buffer = buffers[index].start[1];
   else
     buffer += queue->encoded_width * queue->encoded_height;
 
-  if (fread(buffer, frame_size, 1, fp) != 1) {
-    fprintf(stderr, "unable to read chroma frame\n");
-    return -1;
-  }
+  const size_t chroma_planes_size = luma_plane_size / 2;
+  memcpy(buffer, frame_buffer + luma_plane_size, chroma_planes_size);
 
   return queue_OUTPUT_buffer(queue, buffers, index);
 }
 
-// This function copies the contents pointed by |fp| to |queue|s |index| buffer.
-int submit_raw_frame_row_by_row(FILE* fp,
+// This function copies the contents pointed by |frame_buffer|
+// to |queue|s |index| buffer.  Copy row by row for the situations
+// where the width/height of the v4l2 buffer is different than
+// that of the file on disk, or when conversion between formats is necessary.
+int submit_raw_frame_row_by_row(const uint8_t* frame_buffer,
                                 uint32_t file_format,
                                 struct queue* queue,
                                 uint32_t index) {
@@ -240,18 +250,18 @@ int submit_raw_frame_row_by_row(FILE* fp,
   assert(file_format == v4l2_fourcc('Y', 'V', '1', '2'));
 
   struct mmap_buffers* buffers = queue->buffers;
+  const size_t luma_raw_width = queue->raw_width;
 
-  // Read Y plane first, row by row.
+  // Read luma plane first, row by row.
   uint8_t* buffer = buffers[index].start[0];
   for (int row = 0; row < queue->raw_height; ++row) {
-    if (fread(buffer, queue->raw_width, 1, fp) != 1) {
-      fprintf(stderr, "unable to read luma row\n");
-      return -1;
-    }
+    memcpy(buffer, frame_buffer, luma_raw_width);
+    frame_buffer += luma_raw_width;
     buffer += queue->encoded_width;
   }
 
-  // Now read the U and V planes.
+  const size_t chroma_raw_width = luma_raw_width / 2;
+  // Now read the chroma planes.
   if ((queue->fourcc == v4l2_fourcc('Y', 'V', '1', '2') ||
        queue->fourcc == v4l2_fourcc('Y', 'M', '1', '2')) &&
       file_format == v4l2_fourcc('Y', 'V', '1', '2')) {
@@ -264,10 +274,8 @@ int submit_raw_frame_row_by_row(FILE* fp,
     const uint32_t stride_u = queue->strides[1];
 
     for (int row = 0; row < queue->raw_height / 2; ++row) {
-      if (fread(buffer, queue->raw_width / 2, 1, fp) != 1) {
-        fprintf(stderr, "unable to read chroma v row\n");
-        return -1;
-      }
+      memcpy(buffer, frame_buffer, chroma_raw_width);
+      frame_buffer += chroma_raw_width;
       buffer += stride_u;
     }
 
@@ -282,10 +290,8 @@ int submit_raw_frame_row_by_row(FILE* fp,
     }
 
     for (int row = 0; row < queue->raw_height / 2; ++row) {
-      if (fread(buffer, queue->raw_width / 2, 1, fp) != 1) {
-        fprintf(stderr, "unable to read chroma u row\n");
-        return -1;
-      }
+      memcpy(buffer, frame_buffer, chroma_raw_width);
+      frame_buffer += chroma_raw_width;
       buffer += stride_v;
     }
 
@@ -293,36 +299,20 @@ int submit_raw_frame_row_by_row(FILE* fp,
              file_format == v4l2_fourcc('Y', 'V', '1', '2') &&
              queue->num_planes == 1) {
     assert(queue->num_planes == 1);
-
-    // Copy all chroma samples from |fp| one by one in even |buffer| positions,
-    // then on the second loop iteration, move |buffer| one position right and
-    // copy from |fp| into the odd |buffer| positions.
-    const int kNumPlanes = 2u;
-    for (int plane = 0; plane < kNumPlanes; ++plane) {
-      buffer = buffers[index].start[0] +
-               queue->encoded_width * queue->encoded_height + plane;
-      const uint32_t row_padding = queue->encoded_width - queue->raw_width;
-      for (int row = 0; row < queue->raw_height / 4; ++row) {
-        for (int col = 0; col < queue->raw_width / 2; ++col) {
-          if (fread(buffer, 1 /*size */, 1 /*nmemb*/, fp) != 1) {
-            fprintf(stderr, "unable to read chroma v byte\n");
-            return -1;
-          }
-          buffer += 2;
-        }
-        buffer += row_padding;
-
-        for (int col = 0; col < queue->raw_width / 2; ++col) {
-          if (fread(buffer, 1 /*size */, 1 /*nmemb*/, fp) != 1) {
-            fprintf(stderr, "unable to read chroma u byte\n");
-            return -1;
-          }
-          buffer += 2;
-        }
-        buffer += row_padding;
+    buffer =
+        buffers[index].start[0] + queue->encoded_width * queue->encoded_height;
+    const uint8_t* u_ptr = frame_buffer;
+    const uint8_t* v_ptr = frame_buffer +
+                                 ((queue->raw_width * queue->raw_height) / 4);
+    for (int row = 0; row < queue->raw_height / 2; ++row) {
+      for (int col = 0; col < chroma_raw_width; ++col) {
+        buffer[col * 2] = u_ptr[col];
+        buffer[col * 2 + 1] = v_ptr[col];
       }
+      buffer += queue->encoded_width;
+      u_ptr += chroma_raw_width;
+      v_ptr += chroma_raw_width;
     }
-
   } else {
     fprintf(stderr,
             "combination of queue format, number of planes, and file format "
@@ -333,20 +323,27 @@ int submit_raw_frame_row_by_row(FILE* fp,
   return queue_OUTPUT_buffer(queue, buffers, index);
 }
 
-// This function copies the content of |fp| into the |index|th buffer of
-// |queue|. Depending on |file_format| and the |queue| format, and the raw and
-// encoded sizes of the latter, we might do a copy in bulk or need conversion.
-int submit_raw_frame(FILE* fp,
-                     uint32_t file_format,
+// Read the contents of a frame from the file on disk to a memory buffer.
+// This makes later format conversions quicker as there is no need to
+// read a byte at a time from the disk.
+// The frame is then copied to a |queue| buffer and submitted to the driver
+// by the leaf functions.
+int submit_raw_frame(const struct file_buffer* fb,
+                     const struct file_info* fi,
                      struct queue* queue,
                      uint32_t index) {
-  if (queue->raw_width == queue->encoded_width &&
-      queue->fourcc == file_format &&
-      queue->fourcc == v4l2_fourcc('N', 'V', '1', '2')) {
-    return submit_raw_frame_in_bulk(fp, queue, index);
+  if (fread(fb->buffer, fb->frame_size, 1, fi->fp) != 1) {
+    fprintf(stderr, "unable to read frame into memory\n");
+    return -1;
   }
 
-  return submit_raw_frame_row_by_row(fp, file_format, queue, index);
+  if (queue->raw_width == queue->encoded_width &&
+      queue->fourcc == fi->format &&
+      queue->fourcc == v4l2_fourcc('N', 'V', '1', '2')) {
+    return submit_raw_frame_in_bulk(fb->buffer, queue, index);
+  }
+
+  return submit_raw_frame_row_by_row(fb->buffer, fi->format, queue, index);
 }
 
 void cleanup_queue(struct queue* queue) {
@@ -743,8 +740,8 @@ void drain(struct queue* OUTPUT_queue,
     perror("VIDIOC_STREAMOFF failed on CAPTURE");
 }
 
-int encode(FILE* fp_input,
-           uint32_t file_format,
+int encode(const struct file_buffer* fb,
+           const struct file_info* fi,
            char* output_file_name,
            struct queue* OUTPUT_queue,
            struct queue* CAPTURE_queue,
@@ -791,7 +788,7 @@ int encode(FILE* fp_input,
   if (!ret) {
     // prime input by filling up the OUTPUT queue with raw frames
     for (uint32_t i = 0; i < OUTPUT_queue->cnt; ++i) {
-      if (submit_raw_frame(fp_input, file_format, OUTPUT_queue, i)) {
+      if (submit_raw_frame(fb, fi, OUTPUT_queue, i)) {
         fprintf(stderr, "unable to submit raw frame\n");
         ret = 1;
       }
@@ -851,7 +848,7 @@ int encode(FILE* fp_input,
         if (ret != 0)
           continue;
 
-        if (submit_raw_frame(fp_input, file_format, OUTPUT_queue, index))
+        if (submit_raw_frame(fb, fi, OUTPUT_queue, index))
           break;
       }
       cnt++;
@@ -1012,26 +1009,6 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  if (!file_name || !output_file_name || width == 0 || height == 0) {
-    fprintf(stderr, "Invalid parameters!\n");
-    print_help(argv[0]);
-    exit(1);
-  }
-
-  FILE* fp = fopen(file_name, "rb");
-  if (!fp) {
-    fprintf(stderr, "%s: unable to open file.\n", file_name);
-    exit(1);
-  }
-
-  if (!frames_to_encode) {
-    fseek(fp, 0, SEEK_END);
-    uint64_t length = ftell(fp);
-    uint32_t frame_size = (3 * width * height) >> 1;
-    frames_to_encode = length / frame_size;
-    fseek(fp, 0, SEEK_SET);
-  }
-
   const int bitrate_mode = get_control_value(common_control_list,
                                              V4L2_CID_MPEG_VIDEO_BITRATE_MODE);
   fprintf(
@@ -1064,6 +1041,36 @@ int main(int argc, char* argv[]) {
     exit(EXIT_FAILURE);
   }
 
+  if (!file_name || !output_file_name || width == 0 || height == 0) {
+    fprintf(stderr, "Invalid parameters!\n");
+    print_help(argv[0]);
+    exit(1);
+  }
+
+  struct file_info fi = {.format = file_format};
+  fi.fp = fopen(file_name, "rb");
+  if (!fi.fp) {
+    fprintf(stderr, "%s: unable to open file.\n", file_name);
+    exit(1);
+  }
+
+  // frame calculations assume 4:2:0
+  const uint32_t frame_size = (3 * width * height) >> 1;
+  if (!frames_to_encode) {
+    fseek(fi.fp, 0, SEEK_END);
+    uint64_t length = ftell(fi.fp);
+    frames_to_encode = length / frame_size;
+    fseek(fi.fp, 0, SEEK_SET);
+  }
+
+  uint8_t* frame_buffer = malloc(frame_size);
+  struct file_buffer fb = {.buffer = frame_buffer,
+                           .frame_size = frame_size};
+
+  fprintf(stderr, "encoding %d frames using %s bitrate control\n",
+          frames_to_encode,
+          (bitrate_mode == V4L2_MPEG_VIDEO_BITRATE_MODE_CBR) ? "CBR" : "VBR");
+
   struct queue OUTPUT_queue = {.v4lfd = v4lfd,
                                .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
                                .fourcc = OUTPUT_format,
@@ -1094,7 +1101,7 @@ int main(int argc, char* argv[]) {
   }
 
   if (!ret) {
-    ret = encode(fp, file_format, output_file_name, &OUTPUT_queue,
+    ret = encode(&fb, &fi, output_file_name, &OUTPUT_queue,
                  &CAPTURE_queue, frames_to_encode);
   }
 
@@ -1104,6 +1111,7 @@ int main(int argc, char* argv[]) {
   v4l2_close(v4lfd);
 #endif
 
+  free(fb.buffer);
   close(v4lfd);
 
   return 0;
