@@ -46,6 +46,9 @@
 
 #define MICROSECONDS_IN_MILLISECOND 1000
 
+static const char* compatible_devices[4] = {
+    "mediatek,mt8183", "mediatek,mt8186", "mediatek,mt8192", "mediatek,mt8195"};
+
 int mem_fd = -1;
 volatile void* emi_registers = NULL;
 
@@ -58,7 +61,42 @@ int64_t elapsed_time_us(struct timespec start, struct timespec end) {
          ((int64_t)end.tv_nsec - (int64_t)start.tv_nsec) / 1000;
 }
 
+bool check_compatibility() {
+  char compatible_string[512];
+  int compatible_string_len = -1;
+  int i = 0;
+  int device_tree_fd = open("/proc/device-tree/compatible", O_RDONLY);
+
+  if (device_tree_fd < 0)
+    return false;
+
+  compatible_string_len =
+      read(device_tree_fd, compatible_string, sizeof(compatible_string));
+  if (compatible_string_len < 0)
+    return false;
+
+  while (i < compatible_string_len) {
+    for (int j = 0;
+         j < sizeof(compatible_devices) / sizeof(compatible_devices[0]); j++) {
+      if (!strncmp(compatible_string + i, compatible_devices[j],
+                   strlen(compatible_devices[j])))
+        return true;
+    }
+    i += strlen(compatible_string + i) + 1;
+  }
+
+  return false;
+}
+
 void init() {
+  if (!check_compatibility()) {
+    printf("Error! Incompatible device!\n");
+    printf(
+        "This program currently only supports MT8183, MT8186, MT8192, and "
+        "MT8195.\n");
+    exit(EXIT_FAILURE);
+  }
+
   mem_fd = open("/dev/mem", O_RDWR);
   if (mem_fd < 0)
     LOG_FATAL("Error opening /dev/mem! %s\n", strerror(errno));
