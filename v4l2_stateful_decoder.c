@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <libgen.h>
 #include <limits.h>
 #include <linux/videodev2.h>
 #include <openssl/md5.h>
@@ -18,6 +19,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
@@ -84,6 +87,18 @@ struct md5_hash {
 struct data_buffer {
   uint8_t* data;
   size_t size;
+};
+
+enum file_output_type {
+  FILE_NONE = 0,
+  FILE_SINGLE = 1,
+  FILE_MULTIPLE = 2
+};
+
+struct file_output {
+  FILE* single_fp;
+  char* file_prefix;
+  enum file_output_type type;
 };
 
 bool is_vp9(uint32_t fourcc) {
@@ -807,27 +822,37 @@ int setup_CAPTURE(struct gbm_device* gbm,
 // Image width: 800
 // Image height: 450
 // This results in a file written to: /path/file_frame_0012_800x450_I420.yuv
-void write_frame_to_disk(const char* output_file_prefix,
-                        struct queue* CAPTURE_queue,
-                        uint32_t queue_index) {
-  // TODO(b/204566257) doesn't support writing to a single file
-  #define FILE_NAME_FORMAT "%s_frame_%04d_%dx%d_I420.yuv"
-  // Update FILE_NAME_FORMAT if this assert is triggered.
-  assert(CAPTURE_queue->displayed_frames <= 9999);
-  const int sz = snprintf(NULL, 0, FILE_NAME_FORMAT, output_file_prefix,
-                          CAPTURE_queue->displayed_frames,
-                          CAPTURE_queue->display_area.width,
-                          CAPTURE_queue->display_area.height);
-  char file_name[sz + 1]; // note +1 for terminating null byte
-  snprintf(file_name, sizeof file_name, FILE_NAME_FORMAT, output_file_prefix,
-           CAPTURE_queue->displayed_frames, CAPTURE_queue->display_area.width,
-           CAPTURE_queue->display_area.height);
-  #undef FILE_NAME_FORMAT
+void write_frame_to_disk(const struct file_output* file_output,
+                         struct queue* CAPTURE_queue,
+                         uint32_t queue_index) {
 
-  FILE* fp = fopen(file_name, "wb");
+  FILE* fp = 0;
+  if (FILE_MULTIPLE == file_output->type) {
+    #define FILE_NAME_FORMAT "%s_frame_%04d_%dx%d_I420.yuv"
+    // Update FILE_NAME_FORMAT if this assert is triggered.
+    assert(CAPTURE_queue->displayed_frames <= 9999);
+    const int sz = snprintf(NULL, 0, FILE_NAME_FORMAT,
+                            file_output->file_prefix,
+                            CAPTURE_queue->displayed_frames,
+                            CAPTURE_queue->display_area.width,
+                            CAPTURE_queue->display_area.height);
+    char file_name[sz + 1]; // note +1 for terminating null byte
+    snprintf(file_name, sizeof file_name, FILE_NAME_FORMAT,
+            file_output->file_prefix,
+            CAPTURE_queue->displayed_frames,
+            CAPTURE_queue->display_area.width,
+            CAPTURE_queue->display_area.height);
+    #undef FILE_NAME_FORMAT
 
-  if (!fp)
-    LOG_ERROR("Unable to open output yuv file: %s.", file_name);
+    fp = fopen(file_name, "wb");
+
+    if (!fp)
+      LOG_ERROR("Unable to open output yuv file: %s.", file_name);
+  } else if (FILE_SINGLE == file_output->type) {
+    fp = file_output->single_fp;
+  } else {
+    return;
+  }
 
   if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_YUV420M) {
     // Technically this path could also support V4L2_PIX_FMT_YVU420 and other
@@ -844,14 +869,14 @@ void write_frame_to_disk(const char* output_file_prefix,
       fwrite(chroma_buffer, uv_plane_size, 1, fp);
     }
   } else {
-    // TODO(b/204566257) doesn't support writing full decoded buffers
     struct data_buffer buffer_i420 =
       map_buffers_and_convert_to_i420(CAPTURE_queue, queue_index);
 
     fwrite(buffer_i420.data, buffer_i420.size, 1, fp);
   }
 
-  fclose(fp);
+  if (FILE_MULTIPLE == file_output->type)
+    fclose(fp);
 }
 
 int dequeue_buffer(struct queue* queue,
@@ -1126,7 +1151,7 @@ int decode(struct gbm_device* gbm,
            struct queue* CAPTURE_queue,
            struct queue* OUTPUT_queue,
            uint64_t modifier,
-           const char* output_file_prefix,
+           const struct file_output *file_output,
            uint32_t frames_to_decode,
            bool print_md5hash,
            process_opaque_frame_function process_opaque_frame_fp,
@@ -1194,9 +1219,10 @@ int decode(struct gbm_device* gbm,
               return -1;
             }
             mdp_CAPTURE_queue->displayed_frames++;
-            if (output_file_prefix &&
+            if ((FILE_NONE != file_output->type) &&
                 mdp_CAPTURE_queue_buffer_index != kInvalidBufferIndex) {
-              write_frame_to_disk(output_file_prefix, mdp_CAPTURE_queue,
+              write_frame_to_disk(file_output,
+                                  mdp_CAPTURE_queue,
                                   mdp_CAPTURE_queue_buffer_index);
             }
 
@@ -1210,8 +1236,8 @@ int decode(struct gbm_device* gbm,
                   CAPTURE_queue->displayed_frames);
             }
           } else {
-            if (output_file_prefix)
-              write_frame_to_disk(output_file_prefix, CAPTURE_queue, index);
+            if (FILE_NONE != file_output->type)
+              write_frame_to_disk(file_output, CAPTURE_queue, index);
 
             if (print_md5hash)
               map_buffers_and_calculate_md5hash(CAPTURE_queue, index);
@@ -1286,7 +1312,10 @@ int decode(struct gbm_device* gbm,
 static void print_help(const char* argv0) {
   printf("usage: %s [OPTIONS]\n", argv0);
   printf("  -f, --file        ivf file to decode\n");
-  printf("  -w, --write       write visible frames in I420 format\n");
+  printf("  -w, --write       output visible frames in I420 format "
+                             "to individual files (one frame per file)\n");
+  printf("  -s, --single      file name to output all visible frames in I420 "
+                             "format to\n");
   printf("  -m, --max         max number of visible frames to decode\n");
   printf("  -a, --mmap        use mmap instead of dmabuf\n");
   printf("  -c, --capture_fmt fourcc of the CAPTURE queue, i.e. the "
@@ -1307,21 +1336,23 @@ static const struct option longopts[] = {
     {"log_level", required_argument, NULL, 'l'},
     {"md5", no_argument, NULL, 'd'},
     {"frame_rate", required_argument, NULL, 'r'},
+    {"single", required_argument, NULL, 's'},
     {0, 0, 0, 0},
 };
 
 int main(int argc, char* argv[]) {
   int c;
   char* file_name = NULL;
-  bool write_out = false;
   bool print_md5hash = false;
   uint32_t frames_to_decode = UINT_MAX;
   uint32_t frame_rate = kInvalidFrameRate;
   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
   uint32_t uncompressed_fourcc = V4L2_PIX_FMT_INVALID;
   enum v4l2_memory CAPTURE_memory = V4L2_MEMORY_DMABUF;
+  struct file_output file_output = {};
 
-  while ((c = getopt_long(argc, argv, "f:m:wac:l:dr:", longopts, NULL)) != -1) {
+  while ((c = getopt_long(argc, argv, "f:m:wac:l:dr:s:", longopts, NULL))
+          != -1) {
     switch (c) {
       case 'f':
         file_name = strdup(optarg);
@@ -1329,8 +1360,26 @@ int main(int argc, char* argv[]) {
       case 'm':
         frames_to_decode = atoi(optarg);
         break;
+      case 's':
+        if (file_output.type != FILE_NONE) {
+          LOG_FATAL("Can only write out single OR multiple files, not both");
+        } else {
+          char* path_str = strdup(optarg);
+          char* dir_str = dirname(path_str);
+          mkdir(dir_str, 0777);
+          free(path_str);
+          file_output.single_fp = fopen(optarg, "wb");
+          file_output.type = FILE_SINGLE;
+          if (!file_output.single_fp)
+            LOG_FATAL("Unable to create output yuv file: %s.", optarg);
+        }
+        break;
       case 'w':
-        write_out = true;
+        if (file_output.type != FILE_NONE) {
+          LOG_FATAL("Can only write out single OR multiple files, not both");
+        } else {
+          file_output.type = FILE_MULTIPLE;
+        }
         break;
       case 'a':
         CAPTURE_memory = V4L2_MEMORY_MMAP;
@@ -1400,10 +1449,9 @@ int main(int argc, char* argv[]) {
 
   init_bitstream(file_name);
 
-  char* output_file_prefix = NULL;
-  if (write_out) {
+  if (FILE_MULTIPLE == file_output.type) {
     const size_t len_prefix = strrchr(file_name, '.') - file_name;
-    output_file_prefix = strndup(file_name, len_prefix);
+    file_output.file_prefix = strndup(file_name, len_prefix);
   }
 
   int v4lfd = open(kDecodeDevice, O_RDWR | O_NONBLOCK | O_CLOEXEC);
@@ -1518,12 +1566,14 @@ int main(int argc, char* argv[]) {
 
   if (!ret) {
     ret = decode(gbm, &CAPTURE_queue, &OUTPUT_queue, modifier,
-                 output_file_prefix, frames_to_decode, print_md5hash,
+                 &file_output, frames_to_decode, print_md5hash,
                  process_opaque_frame_fp, mdp_OUTPUT_queue, mdp_CAPTURE_queue);
   }
 
-  if (output_file_prefix)
-    free(output_file_prefix);
+  if (file_output.file_prefix)
+    free(file_output.file_prefix);
+  if (file_output.single_fp)
+    fclose(file_output.single_fp);
   if(mdp_OUTPUT_queue)
     free(mdp_OUTPUT_queue);
   if (mdp_CAPTURE_queue)
