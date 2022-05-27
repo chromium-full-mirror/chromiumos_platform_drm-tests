@@ -1436,15 +1436,20 @@ int main(int argc, char* argv[]) {
     exit(1);
   }
 
-  int drm_device_fd = bs_drm_open_main_display();
-  if (drm_device_fd < 0) {
-    LOG_FATAL("Failed to open card for display.");
-  }
+  int drm_device_fd = -1;
+  struct gbm_device* gbm = NULL;
+  const use_gbm = V4L2_MEMORY_DMABUF == CAPTURE_memory;
+  if (use_gbm) {
+    drm_device_fd = bs_drm_open_main_display();
+    if (drm_device_fd < 0) {
+      LOG_FATAL("Failed to open card for display.");
+    }
 
-  struct gbm_device* gbm = gbm_create_device(drm_device_fd);
-  if (!gbm) {
-    close(drm_device_fd);
-    LOG_FATAL("Failed to create gbm device.");
+    gbm = gbm_create_device(drm_device_fd);
+    if (!gbm) {
+      close(drm_device_fd);
+      LOG_FATAL("Failed to create gbm device.");
+    }
   }
 
   init_bitstream(file_name);
@@ -1584,7 +1589,8 @@ int main(int argc, char* argv[]) {
   cleanup_queue(&OUTPUT_queue);
   cleanup_queue(&CAPTURE_queue);
   close(v4lfd);
-  close(drm_device_fd);
+  if (use_gbm)
+    close(drm_device_fd);
   free(file_name);
   cleanup_bitstream();
 
