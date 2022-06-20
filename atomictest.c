@@ -49,14 +49,9 @@ int sw_sync_timeline_create(void);
 int sw_sync_timeline_inc(int fd, unsigned count);
 int sw_sync_fence_create(int fd, const char *name, unsigned value);
 
-// TODO(gsingh) This is defined in upstream libdrm -- remove when CROS libdrm is updated.
-#ifndef DRM_ROTATE_0
-#define DRM_ROTATE_0 (1UL << 0)
-#endif
+#define DRM_MODE_ROTATE_0_LOG2 0
 
-#ifndef DRM_REFLECT_Y
-#define DRM_REFLECT_Y (1UL << 5)
-#endif
+#define DRM_MODE_REFLECT_Y_LOG2 5
 
 #define TEST_COMMIT_FAIL 1
 
@@ -526,7 +521,7 @@ static int disable_plane(struct atomictest_context *ctx, struct atomictest_plane
 	plane->in_fence_fd.value = -1;
 
 	if (plane->rotation.pid)
-		plane->rotation.value = DRM_ROTATE_0;
+		plane->rotation.value = DRM_MODE_ROTATE_0;
 	if (plane->ctm.pid)
 		plane->ctm.value = 0;
 
@@ -1064,14 +1059,14 @@ static int test_orientation(struct atomictest_context *ctx, struct atomictest_cr
 		CHECK(rotation_prop);
 		CHECK_RESULT(init_plane_any_format(ctx, overlay, 0, 0, crtc->width, crtc->height,
 						   crtc->crtc_id, false));
-		CHECK(prop_contains_value(rotation_prop, DRM_ROTATE_0));
-		overlay->rotation.value = DRM_ROTATE_0;
+		CHECK(prop_contains_value(rotation_prop, DRM_MODE_ROTATE_0_LOG2));
+		overlay->rotation.value = DRM_MODE_ROTATE_0;
 		set_plane_props(overlay, ctx->pset);
 		CHECK_RESULT(draw_to_plane(ctx->mapper, overlay, DRAW_LINES));
 		ret |= test_and_commit(ctx, 1e6);
 
-		if (prop_contains_value(rotation_prop, DRM_REFLECT_Y)) {
-			overlay->rotation.value = DRM_REFLECT_Y;
+		if (prop_contains_value(rotation_prop, DRM_MODE_REFLECT_Y_LOG2)) {
+			overlay->rotation.value = DRM_MODE_REFLECT_Y;
 			set_plane_props(overlay, ctx->pset);
 			ret |= test_and_commit(ctx, 1e6);
 
@@ -1090,14 +1085,14 @@ static int test_orientation(struct atomictest_context *ctx, struct atomictest_cr
 		CHECK(rotation_prop);
 		CHECK_RESULT(init_plane_any_format(ctx, primary, 0, 0, crtc->width, crtc->height,
 						   crtc->crtc_id, false));
-		CHECK(prop_contains_value(rotation_prop, DRM_ROTATE_0));
-		primary->rotation.value = DRM_ROTATE_0;
+		CHECK(prop_contains_value(rotation_prop, DRM_MODE_ROTATE_0_LOG2));
+		primary->rotation.value = DRM_MODE_ROTATE_0;
 		set_plane_props(primary, ctx->pset);
 		CHECK_RESULT(draw_to_plane(ctx->mapper, primary, DRAW_LINES));
 		ret |= test_and_commit(ctx, 1e6);
 
-		if (prop_contains_value(rotation_prop, DRM_REFLECT_Y)) {
-			primary->rotation.value = DRM_REFLECT_Y;
+		if (prop_contains_value(rotation_prop, DRM_MODE_REFLECT_Y_LOG2)) {
+			primary->rotation.value = DRM_MODE_REFLECT_Y;
 			set_plane_props(primary, ctx->pset);
 			ret |= test_and_commit(ctx, 1e6);
 		}
