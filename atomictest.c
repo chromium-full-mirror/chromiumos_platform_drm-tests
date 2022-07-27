@@ -1227,6 +1227,10 @@ static int test_out_fence(struct atomictest_context *ctx, struct atomictest_crtc
 	// is a valid fence.
 	CHECK(!sync_wait(out_fence_fd, 0));
 	close(out_fence_fd);
+	// Reset this to NULL so subsequent commits from the same atomictest_context will
+	// not set the out_fence property. If not cleared, this will result in stack corruption
+	// since out_fence_fd is on the stack.
+	crtc->out_fence_ptr.value = 0;
 	return ret;
 }
 
