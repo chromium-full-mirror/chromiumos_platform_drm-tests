@@ -24,8 +24,32 @@
 
 // Control register for EMI bus monitor.
 #define EMI_BMEN 0x400
+
+// Bus selection registers
+#define EMI_MSEL 0x440
+#define EMI_MSEL2 0x468
+
+// Configures the counters to read 8-byte DRAM bursts.
+#define EIGHT_BYTE_TRANSACTION 0x3000
+
 // Counter for number of accesses. Unit is 8 bytes.
+// Note that this counter is for all accesses, and doesn't discriminate by bus.
 #define EMI_WACT 0x420
+
+// Counters for number of accesses. Unit is 8 bytes.
+// These counters can be attached to individual bus controllers.
+#define EMI_WSCT 0x428
+#define EMI_WSCT2 0x458
+#define EMI_WSCT3 0x460
+#define EMI_WSCT4 0x464
+
+// Platform specific flags for bus controllers
+// Note that we've only found good values for MT8183. It seems the SSPM
+// interferes with the bus controller configuration registers on other
+// platforms.
+#define MT8183_CPU_BUS 0x01 | 0x02
+#define MT8183_GPU_BUS 0x40 | 0x80
+#define MT8183_M4U_BUS 0x20
 
 // The memory address of the EMI registers is the same for everything after the
 // MT8183.
@@ -46,8 +70,10 @@
 
 #define MICROSECONDS_IN_MILLISECOND 1000
 
-static const char* compatible_devices[4] = {
+static const char* total_bandwidth_compatible_devices[4] = {
     "mediatek,mt8183", "mediatek,mt8186", "mediatek,mt8192", "mediatek,mt8195"};
+static const char* granular_bandwidth_compatible_devices[1] = {
+    "mediatek,mt8183"};
 
 int mem_fd = -1;
 volatile void* emi_registers = NULL;
@@ -61,7 +87,7 @@ int64_t elapsed_time_us(struct timespec start, struct timespec end) {
          ((int64_t)end.tv_nsec - (int64_t)start.tv_nsec) / 1000;
 }
 
-bool check_compatibility() {
+bool check_compatibility(size_t num_devices, const char* compatible_devices[]) {
   char compatible_string[512];
   int compatible_string_len = -1;
   int i = 0;
@@ -76,8 +102,7 @@ bool check_compatibility() {
     return false;
 
   while (i < compatible_string_len) {
-    for (int j = 0;
-         j < sizeof(compatible_devices) / sizeof(compatible_devices[0]); j++) {
+    for (int j = 0; j < num_devices; j++) {
       if (!strncmp(compatible_string + i, compatible_devices[j],
                    strlen(compatible_devices[j])))
         return true;
@@ -89,11 +114,16 @@ bool check_compatibility() {
 }
 
 void init() {
-  if (!check_compatibility()) {
+  if (!check_compatibility(sizeof(total_bandwidth_compatible_devices) /
+                               sizeof(total_bandwidth_compatible_devices[0]),
+                           total_bandwidth_compatible_devices)) {
     printf("Error! Incompatible device!\n");
-    printf(
-        "This program currently only supports MT8183, MT8186, MT8192, and "
-        "MT8195.\n");
+    printf("This program currently only supports:\n");
+    for (int i = 0;
+         i < sizeof(total_bandwidth_compatible_devices) / sizeof(const char*);
+         i++)
+      printf("%s\n", total_bandwidth_compatible_devices[i]);
+
     exit(EXIT_FAILURE);
   }
 
@@ -133,8 +163,12 @@ void pause_bus_monitor() {
   write32(EMI_BMEN, val);
 }
 
-uint32_t get_word_counter() {
+uint32_t get_total_word_count() {
   return read32(EMI_WACT);
+}
+
+uint32_t get_word_count(uint32_t counter) {
+  return read32(counter);
 }
 
 void disable_bus_monitor() {
@@ -150,7 +184,7 @@ void enable_bus_monitor() {
 void start_bus_monitor() {
   disable_bus_monitor();
 
-  uint32_t val = get_word_counter();
+  uint32_t val = get_total_word_count();
 
   // Disabling the bandwidth monitor is supposed to clear the counters, but for
   // some reason this is sticky even with the fencing instructions. The android
@@ -161,13 +195,46 @@ void start_bus_monitor() {
   while (val && retry_count--) {
     enable_bus_monitor();
     disable_bus_monitor();
-    val = get_word_counter();
+    val = get_total_word_count();
   }
 
   if (!retry_count)
     LOG_FATAL("Error! Could not reset bus monitor!\n");
 
   enable_bus_monitor();
+}
+
+void set_bus_controller(uint32_t counter, uint8_t controller) {
+  uint32_t val;
+  switch (counter) {
+    case EMI_WSCT:
+      val = read32(EMI_BMEN);
+      val &= ~0xFFFF0000;
+      val |= (uint32_t)controller << 16 | EIGHT_BYTE_TRANSACTION << 16;
+      write32(EMI_BMEN, val);
+      break;
+    case EMI_WSCT2:
+      val = read32(EMI_MSEL);
+      val &= ~0xFFFF;
+      val |= controller | EIGHT_BYTE_TRANSACTION;
+      write32(EMI_MSEL, val);
+      break;
+    case EMI_WSCT3:
+      val = read32(EMI_MSEL);
+      val &= ~0xFFFF0000;
+      val |= (uint32_t)controller << 16 | EIGHT_BYTE_TRANSACTION << 16;
+      write32(EMI_MSEL, val);
+      break;
+    case EMI_WSCT4:
+      val = read32(EMI_MSEL2);
+      val &= ~0xFFFF;
+      val |= controller | EIGHT_BYTE_TRANSACTION;
+      write32(EMI_MSEL2, val);
+      break;
+    default:
+      LOG_ERROR("Error! Invalid counter %x\n", counter);
+      exit(-1);
+  }
 }
 
 void print_help() {
@@ -205,21 +272,61 @@ int main(int argc, char** argv) {
   // Sample the bandwidth counters at 1KHz. They're only 32 bit, so they
   // overflow pretty easily, which is why we sample so fast.
   double avg_bandwidth_usage = 0.0;
+  double cpu_avg = 0.0;
+  double gpu_avg = 0.0;
+  double m4u_avg = 0.0;
   struct timespec start;
   struct timespec end;
+
+  bool granular_info_supported =
+      check_compatibility(sizeof(granular_bandwidth_compatible_devices) /
+                              sizeof(granular_bandwidth_compatible_devices[0]),
+                          granular_bandwidth_compatible_devices);
+
+  if (granular_info_supported) {
+    set_bus_controller(EMI_WSCT, MT8183_CPU_BUS);
+    set_bus_controller(EMI_WSCT4, MT8183_GPU_BUS);
+    set_bus_controller(EMI_WSCT3, MT8183_M4U_BUS);
+  }
+
   for (int i = 0; i < measure_time_ms; i++) {
     start_bus_monitor();
     clock_gettime(CLOCK_MONOTONIC, &start);
     usleep(MICROSECONDS_IN_MILLISECOND);
     pause_bus_monitor();
     clock_gettime(CLOCK_MONOTONIC, &end);
-    uint32_t word_count = get_word_counter();
+    uint32_t word_count = get_total_word_count();
+
     avg_bandwidth_usage += (double)word_count * EMI_ACCESS_UNIT_SIZE *
                            1000000.0 / ((double)elapsed_time_us(start, end));
+
+    if (granular_info_supported) {
+      word_count = get_word_count(EMI_WSCT);
+      cpu_avg += (double)word_count * EMI_ACCESS_UNIT_SIZE * 1000000.0 /
+                 ((double)elapsed_time_us(start, end));
+      word_count = get_word_count(EMI_WSCT4);
+      gpu_avg += (double)word_count * EMI_ACCESS_UNIT_SIZE * 1000000.0 /
+                 ((double)elapsed_time_us(start, end));
+      word_count = get_word_count(EMI_WSCT3);
+      m4u_avg += (double)word_count * EMI_ACCESS_UNIT_SIZE * 1000000.0 /
+                 ((double)elapsed_time_us(start, end));
+    }
   }
   avg_bandwidth_usage = avg_bandwidth_usage / ((double)measure_time_ms);
 
+  if (granular_info_supported) {
+    cpu_avg = cpu_avg / ((double)measure_time_ms);
+    gpu_avg = gpu_avg / ((double)measure_time_ms);
+    m4u_avg = m4u_avg / ((double)measure_time_ms);
+  }
+
   printf("%f B/s\n", avg_bandwidth_usage);
+
+  if (granular_info_supported) {
+    printf("CPU Bus: %f B/s\n", cpu_avg);
+    printf("GPU Bus: %f B/s\n", gpu_avg);
+    printf("M4U Bus: %f B/s\n", m4u_avg);
+  }
 
   cleanup();
 
