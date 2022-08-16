@@ -44,6 +44,11 @@ static uint32_t kPreferredUncompressedFourCCs[] = {V4L2_PIX_FMT_NV12,
 
 static int log_run_level = DEFAULT_LOG_LEVEL;
 
+struct per_frame_md5_hash_logs {
+  bool enabled;
+  FILE* output_fp;
+};
+
 struct mmap_buffers {
   void* start[VIDEO_MAX_PLANES];
   size_t length[VIDEO_MAX_PLANES];
@@ -373,7 +378,9 @@ struct data_buffer nv12_to_i420(struct v4l2_rect display_area,
 
 void compute_and_print_md5hash(const void *data,
                                size_t len,
-                               uint32_t frame_index) {
+                               uint32_t frame_index,
+                               const struct per_frame_md5_hash_logs*
+                               md5_hash_logs) {
   struct md5_hash hash;
   MD5_CTX ctx;
 
@@ -384,8 +391,8 @@ void compute_and_print_md5hash(const void *data,
   // This printout follows the ways of Tast PlatformDecoding. Don't change !
   LOG_INFO("frame # %d - ", frame_index);
   for (int n = 0; n < 16; ++n)
-    printf("%02x", hash.bytes[n]);
-  printf("\n");
+    fprintf(md5_hash_logs->output_fp, "%02x", hash.bytes[n]);
+  fprintf(md5_hash_logs->output_fp, "\n");
 }
 
 // Handles cropping a frame to the displayable area. The returned struct
@@ -450,14 +457,16 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
 
 // Maps |CAPTURE_queue|'s buffer at |queue_index| and calculates its MD5 sum.
 void map_buffers_and_calculate_md5hash(struct queue* CAPTURE_queue,
-                                       uint32_t queue_index) {
+                                       uint32_t queue_index,
+                                       const struct per_frame_md5_hash_logs*
+                                       md5_hash_logs) {
 
   struct data_buffer buffer_i420 =
     map_buffers_and_convert_to_i420(CAPTURE_queue, queue_index);
   assert(buffer_i420.data);
 
   compute_and_print_md5hash(buffer_i420.data, buffer_i420.size,
-                            CAPTURE_queue->displayed_frames);
+                            CAPTURE_queue->displayed_frames, md5_hash_logs);
 
   free(buffer_i420.data);
 }
@@ -1153,7 +1162,7 @@ int decode(struct gbm_device* gbm,
            uint64_t modifier,
            const struct file_output *file_output,
            uint32_t frames_to_decode,
-           bool print_md5hash,
+           const struct per_frame_md5_hash_logs* md5_hash_logs,
            process_opaque_frame_function process_opaque_frame_fp,
            struct queue* mdp_OUTPUT_queue,
            struct queue* mdp_CAPTURE_queue) {
@@ -1226,21 +1235,22 @@ int decode(struct gbm_device* gbm,
                                   mdp_CAPTURE_queue_buffer_index);
             }
 
-            if (print_md5hash &&
+            if (md5_hash_logs->enabled &&
                 mdp_CAPTURE_queue_buffer_index != kInvalidBufferIndex) {
               compute_and_print_md5hash(
                   mdp_CAPTURE_queue->buffers[mdp_CAPTURE_queue_buffer_index]
                       .start[0],
                   mdp_CAPTURE_queue->buffers[mdp_CAPTURE_queue_buffer_index]
                       .length[0],
-                  CAPTURE_queue->displayed_frames);
+                  CAPTURE_queue->displayed_frames, md5_hash_logs);
             }
           } else {
             if (FILE_NONE != file_output->type)
               write_frame_to_disk(file_output, CAPTURE_queue, index);
 
-            if (print_md5hash)
-              map_buffers_and_calculate_md5hash(CAPTURE_queue, index);
+            if (md5_hash_logs->enabled)
+              map_buffers_and_calculate_md5hash(CAPTURE_queue, index,
+                                                md5_hash_logs);
           }
         } else {
           LOG_DEBUG("Buffer set %s%s%s.",
@@ -1324,7 +1334,9 @@ static void print_help(const char* argv0) {
                              "3:fatal (default: %d)\n", DEFAULT_LOG_LEVEL);
   printf("  -r, --frame_rate  (optional) specify a frame rate (Hz)\n");
   printf("  -d, --md5         compute md5 hash for each decoded visible frame "
-                             "in I420 format\n");
+                             "in I420 format. (optional) If argument "
+                             "specified, will print md5 hash to specified "
+                             "file. Defaults to stdout\n");
 }
 
 static const struct option longopts[] = {
@@ -1334,7 +1346,7 @@ static const struct option longopts[] = {
     {"mmap", no_argument, NULL, 'a'},
     {"capture_fmt", required_argument, NULL, 'c'},
     {"log_level", required_argument, NULL, 'l'},
-    {"md5", no_argument, NULL, 'd'},
+    {"md5", optional_argument, NULL, 'd'},
     {"frame_rate", required_argument, NULL, 'r'},
     {"single", required_argument, NULL, 's'},
     {0, 0, 0, 0},
@@ -1343,15 +1355,16 @@ static const struct option longopts[] = {
 int main(int argc, char* argv[]) {
   int c;
   char* file_name = NULL;
-  bool print_md5hash = false;
   uint32_t frames_to_decode = UINT_MAX;
   uint32_t frame_rate = kInvalidFrameRate;
   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
   uint32_t uncompressed_fourcc = V4L2_PIX_FMT_INVALID;
   enum v4l2_memory CAPTURE_memory = V4L2_MEMORY_DMABUF;
   struct file_output file_output = {};
+  struct per_frame_md5_hash_logs md5_hash_logs = {.enabled = false,
+                                                  .output_fp = stdout};
 
-  while ((c = getopt_long(argc, argv, "f:m:wac:l:dr:s:", longopts, NULL))
+  while ((c = getopt_long(argc, argv, "f:m:wac:l:d:r:s:", longopts, NULL))
           != -1) {
     switch (c) {
       case 'f':
@@ -1411,7 +1424,12 @@ int main(int argc, char* argv[]) {
         break;
       }
       case 'd':
-        print_md5hash = true;
+        md5_hash_logs.enabled = true;
+        md5_hash_logs.output_fp = (optarg == NULL) ? stdout :
+                                  fopen(strdup(optarg), "w");
+
+        if(!md5_hash_logs.output_fp)
+          LOG_FATAL("Unable to create md5 checksum log file.");
         break;
       case 'r':
         frame_rate = atoi(optarg);
@@ -1571,7 +1589,7 @@ int main(int argc, char* argv[]) {
 
   if (!ret) {
     ret = decode(gbm, &CAPTURE_queue, &OUTPUT_queue, modifier,
-                 &file_output, frames_to_decode, print_md5hash,
+                 &file_output, frames_to_decode, &md5_hash_logs,
                  process_opaque_frame_fp, mdp_OUTPUT_queue, mdp_CAPTURE_queue);
   }
 
@@ -1593,6 +1611,10 @@ int main(int argc, char* argv[]) {
     close(drm_device_fd);
   free(file_name);
   cleanup_bitstream();
+
+  // Closes checksum log file if specified
+  if (md5_hash_logs.output_fp != stdout)
+    fclose(md5_hash_logs.output_fp);
 
   return ret;
 }
