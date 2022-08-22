@@ -60,6 +60,7 @@ int sw_sync_fence_create(int fd, const char *name, unsigned value);
 static const uint32_t yuv_formats[] = {
 	DRM_FORMAT_NV12,
 	DRM_FORMAT_YVU420,
+	DRM_FORMAT_YUYV,
 };
 
 /*
@@ -473,6 +474,7 @@ static int init_plane(struct atomictest_context *ctx, struct atomictest_plane *p
 	plane->src_w.value = plane->crtc_w.value << 16;
 	plane->src_h.value = plane->crtc_h.value << 16;
 	plane->crtc_id.value = crtc_id;
+	plane->rotation.value = DRM_MODE_ROTATE_0;
 
 	CHECK_RESULT(add_plane_fb(ctx, plane));
 	return 0;
@@ -1023,17 +1025,25 @@ static int test_video_overlay(struct atomictest_context *ctx, struct atomictest_
 {
 	int ret = 0;
 	struct atomictest_plane *overlay;
+	uint32_t num_plane_init_fails = 0;
 	for (uint32_t i = 0; i < crtc->num_overlay; i++) {
 		overlay = get_plane(crtc, i, DRM_PLANE_TYPE_OVERLAY);
-		if (init_plane_any_format(ctx, overlay, 0, 0, 800, 800, crtc->crtc_id, true))
+		if (init_plane_any_format(ctx, overlay, 0, 0, 800, 800, crtc->crtc_id, true)) {
+			num_plane_init_fails++;
 			continue;
+		}
 
 		CHECK_RESULT(draw_to_plane(ctx->mapper, overlay, DRAW_STRIPE));
 		while (!move_plane(ctx, crtc, overlay, 40, 40))
 			ret |= test_and_commit(ctx, 1e6 / 60);
 	}
 
-	return ret;
+	if (num_plane_init_fails == crtc->num_overlay) {
+		bs_debug_error("No planes support video formats");
+		return -1;
+	} else {
+		return ret;
+	}
 }
 
 static int prop_contains_value(drmModePropertyPtr prop, uint64_t value)
