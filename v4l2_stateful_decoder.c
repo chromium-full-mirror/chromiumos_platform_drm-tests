@@ -1334,9 +1334,8 @@ static void print_help(const char* argv0) {
                              "3:fatal (default: %d)\n", DEFAULT_LOG_LEVEL);
   printf("  -r, --frame_rate  (optional) specify a frame rate (Hz)\n");
   printf("  -d, --md5         compute md5 hash for each decoded visible frame "
-                             "in I420 format. (optional) If argument "
-                             "specified, will print md5 hash to specified "
-                             "file. Defaults to stdout\n");
+                             "in I420 format. Will print md5 hash to specified "
+                             "file.\n");
 }
 
 static const struct option longopts[] = {
@@ -1346,7 +1345,7 @@ static const struct option longopts[] = {
     {"mmap", no_argument, NULL, 'a'},
     {"capture_fmt", required_argument, NULL, 'c'},
     {"log_level", required_argument, NULL, 'l'},
-    {"md5", optional_argument, NULL, 'd'},
+    {"md5", required_argument, NULL, 'd'},
     {"frame_rate", required_argument, NULL, 'r'},
     {"single", required_argument, NULL, 's'},
     {0, 0, 0, 0},
@@ -1425,8 +1424,7 @@ int main(int argc, char* argv[]) {
       }
       case 'd':
         md5_hash_logs.enabled = true;
-        md5_hash_logs.output_fp = (optarg == NULL) ? stdout :
-                                  fopen(optarg, "w");
+        md5_hash_logs.output_fp = fopen(optarg, "w");
 
         if(!md5_hash_logs.output_fp)
           LOG_FATAL("Unable to create md5 checksum log file.");
