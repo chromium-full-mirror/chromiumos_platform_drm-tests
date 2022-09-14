@@ -1438,6 +1438,7 @@ int main(int argc, char* argv[]) {
         }
         break;
       default:
+        LOG_FATAL("Invalid argument syntax");
         break;
     }
   }
