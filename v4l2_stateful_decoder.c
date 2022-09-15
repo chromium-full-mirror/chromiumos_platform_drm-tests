@@ -1426,7 +1426,7 @@ int main(int argc, char* argv[]) {
       case 'd':
         md5_hash_logs.enabled = true;
         md5_hash_logs.output_fp = (optarg == NULL) ? stdout :
-                                  fopen(strdup(optarg), "w");
+                                  fopen(optarg, "w");
 
         if(!md5_hash_logs.output_fp)
           LOG_FATAL("Unable to create md5 checksum log file.");
