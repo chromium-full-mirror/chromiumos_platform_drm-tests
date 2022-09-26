@@ -46,6 +46,7 @@ static int log_run_level = DEFAULT_LOG_LEVEL;
 
 struct per_frame_md5_hash_logs {
   bool enabled;
+  bool output_file_enabled;
   FILE* output_fp;
 };
 
@@ -381,9 +382,16 @@ void compute_and_print_md5hash(const void *data,
 
   // This printout follows the ways of Tast PlatformDecoding. Don't change !
   LOG_INFO("frame # %d - ", frame_index);
-  for (int n = 0; n < 16; ++n)
-    fprintf(md5_hash_logs->output_fp, "%02x", hash.bytes[n]);
-  fprintf(md5_hash_logs->output_fp, "\n");
+
+  char md5Str[33] = {};
+  for (int n = 0; n < 16; ++n) {
+    sprintf(&md5Str[n * 2], "%02x", hash.bytes[n]);
+  }
+
+  LOG_INFO("MD5 checksum hash: %s", md5Str);
+  if (md5_hash_logs->output_file_enabled) {
+    fprintf(md5_hash_logs->output_fp, "%s\n", md5Str);
+  }
 }
 
 // Handles cropping a frame to the displayable area. The returned struct
@@ -1324,9 +1332,10 @@ static void print_help(const char* argv0) {
   printf("  -l, --log_level   specifies log level, 0:debug 1:info 2:error "
                              "3:fatal (default: %d)\n", DEFAULT_LOG_LEVEL);
   printf("  -r, --frame_rate  (optional) specify a frame rate (Hz)\n");
-  printf("  -d, --md5         compute md5 hash for each decoded visible frame "
-                             "in I420 format. Will print md5 hash to specified "
-                             "file.\n");
+  printf("  -d, --md5        compute md5 hash for each decoded visible frame "
+                             "in I420 format and displays in an INFO log. If "
+                             "specified with argument will also write "
+                             "checksums to specified file.\n");
 }
 
 static const struct option longopts[] = {
@@ -1336,7 +1345,7 @@ static const struct option longopts[] = {
     {"mmap", no_argument, NULL, 'a'},
     {"capture_fmt", required_argument, NULL, 'c'},
     {"log_level", required_argument, NULL, 'l'},
-    {"md5", required_argument, NULL, 'd'},
+    {"md5", optional_argument, NULL, 'd'},
     {"frame_rate", required_argument, NULL, 'r'},
     {"single", required_argument, NULL, 's'},
     {0, 0, 0, 0},
@@ -1352,9 +1361,10 @@ int main(int argc, char* argv[]) {
   enum v4l2_memory CAPTURE_memory = V4L2_MEMORY_DMABUF;
   struct file_output file_output = {};
   struct per_frame_md5_hash_logs md5_hash_logs = {.enabled = false,
-                                                  .output_fp = stdout};
+                                                  .output_file_enabled = false,
+                                                  .output_fp = NULL};
 
-  while ((c = getopt_long(argc, argv, "f:m:wac:l:d:r:s:", longopts, NULL))
+  while ((c = getopt_long(argc, argv, "f:m:wac:l:d::r:s:", longopts, NULL))
           != -1) {
     switch (c) {
       case 'f':
@@ -1415,10 +1425,14 @@ int main(int argc, char* argv[]) {
       }
       case 'd':
         md5_hash_logs.enabled = true;
-        md5_hash_logs.output_fp = fopen(optarg, "w");
+        if(!optarg)
+          break;
 
+        md5_hash_logs.output_fp = fopen(optarg, "w");
         if(!md5_hash_logs.output_fp)
           LOG_FATAL("Unable to create md5 checksum log file.");
+
+        md5_hash_logs.output_file_enabled = true;
         break;
       case 'r':
         frame_rate = atoi(optarg);
@@ -1603,7 +1617,7 @@ int main(int argc, char* argv[]) {
   cleanup_bitstream();
 
   // Closes checksum log file if specified
-  if (md5_hash_logs.output_fp != stdout)
+  if (md5_hash_logs.output_file_enabled)
     fclose(md5_hash_logs.output_fp);
 
   return ret;
