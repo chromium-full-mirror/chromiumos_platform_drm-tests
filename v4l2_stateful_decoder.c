@@ -283,18 +283,9 @@ int request_dmabuf_buffers(struct gbm_device* gbm,
   CAPTURE_queue->buffers = buffers;
   CAPTURE_queue->cnt = count;
 
-  uint32_t gbm_format;
-  if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12 ||
-      CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
-    gbm_format = GBM_FORMAT_NV12;
-  } else if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_P010) {
+  uint32_t gbm_format = GBM_FORMAT_NV12;
+  if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_P010)
     gbm_format = GBM_FORMAT_P010;
-  } else {
-    char fourcc_str[FOURCC_SIZE + 1];
-    LOG_ERROR("%s format not supported for the CAPTURE_queue",
-        fourcc_to_string(CAPTURE_queue->fourcc, fourcc_str));
-    return -1;
-  }
 
   for (uint32_t i = 0; i < CAPTURE_queue->cnt; ++i) {
     const uint32_t width = CAPTURE_queue->coded_width;
