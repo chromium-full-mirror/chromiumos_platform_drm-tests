@@ -449,7 +449,11 @@ static int add_plane_fb(struct atomictest_context *ctx, struct atomictest_plane 
 					  plane->drm_plane.formats[plane->format_idx], flags);
 		}
 
-		CHECK(plane->bo);
+		// bo creation can fail if the drm plane supports a format, but that
+		// format is not supported in minigbm.
+		if(!plane->bo)
+			return -1;
+
 		plane->fb_id.value = bs_drm_fb_create_gbm(plane->bo);
 		CHECK(plane->fb_id.value);
 		CHECK_RESULT(set_plane_props(plane, ctx->pset));
@@ -476,8 +480,7 @@ static int init_plane(struct atomictest_context *ctx, struct atomictest_plane *p
 	plane->crtc_id.value = crtc_id;
 	plane->rotation.value = DRM_MODE_ROTATE_0;
 
-	CHECK_RESULT(add_plane_fb(ctx, plane));
-	return 0;
+	return add_plane_fb(ctx, plane);
 }
 
 static int init_plane_any_format(struct atomictest_context *ctx, struct atomictest_plane *plane,
