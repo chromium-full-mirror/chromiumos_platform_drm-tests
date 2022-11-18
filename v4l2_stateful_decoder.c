@@ -779,6 +779,15 @@ int setup_CAPTURE(struct gbm_device* gbm,
     ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_FMT, &fmt);
     if (ret != 0)
       LOG_ERROR("CAPTURE queue: VIDIOC_S_FMT failed: %s.", strerror(errno));
+
+    // 7.31.4.
+    // When the application calls the VIDIOC_S_FMT ioctl with a pointer to a
+    // struct v4l2_format structure the driver checks and adjusts the
+    // parameters against hardware abilities. Drivers should not return an
+    // error code unless the type field is invalid, this is a mechanism to
+    // fathom device capabilities and to approach parameters acceptable for
+    // both the application and driver.
+    assert(fmt.fmt.pix_mp.pixelformat == CAPTURE_queue->fourcc);
   }
 
   // 5. (Optional) Sets the coded frame interval on the CAPTURE queue via
