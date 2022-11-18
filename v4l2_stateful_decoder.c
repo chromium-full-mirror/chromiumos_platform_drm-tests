@@ -41,6 +41,10 @@
 #define V4L2_PIX_FMT_QC08C    v4l2_fourcc('Q', '0', '8', 'C') /* Qualcomm 8-bit compressed */
 #endif
 
+#ifndef V4L2_PIX_FMT_QC10C
+#define V4L2_PIX_FMT_QC10C    v4l2_fourcc('Q', '1', '0', 'C') /* Qualcomm 10-bit compressed */
+#endif
+
 static const char* kDecodeDevice = "/dev/video-dec0";
 static const int kInputbufferMaxSize = 4 * 1024 * 1024;
 static const int kRequestBufferCount = 8;
@@ -175,7 +179,13 @@ bool capabilities(int fd,
     return false;
   }
 
-  if (*uncompressed_format != V4L2_PIX_FMT_INVALID) {
+  if (*uncompressed_format == V4L2_PIX_FMT_P010 ||
+      *uncompressed_format == V4L2_PIX_FMT_QC10C) {
+    char fourcc_str[FOURCC_SIZE + 1];
+    LOG_INFO("Proceeding with CAPTURE format %s. Unable to test for high bit "
+             "depth capabilities before bitstream is availible.",
+        fourcc_to_string(*uncompressed_format, fourcc_str));
+  } else if (*uncompressed_format != V4L2_PIX_FMT_INVALID) {
     if (!is_fourcc_supported(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
                              *uncompressed_format)) {
       char fourcc_str[FOURCC_SIZE + 1];
