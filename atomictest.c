@@ -490,11 +490,11 @@ static int init_plane_any_format(struct atomictest_context *ctx, struct atomicte
 	if (yuv) {
 		uint32_t i;
 		for (i = 0; i < BS_ARRAY_LEN(yuv_formats); i++)
-			if (init_plane(ctx, plane, yuv_formats[i], x, y, w, h, crtc_id) == 0)
+			if (!init_plane(ctx, plane, yuv_formats[i], x, y, w, h, crtc_id))
 				return 0;
 	} else {
 		// XRGB888 works well with our draw code, so try that first.
-		if (init_plane(ctx, plane, DRM_FORMAT_XRGB8888, x, y, w, h, crtc_id) == 0)
+		if (!init_plane(ctx, plane, DRM_FORMAT_XRGB8888, x, y, w, h, crtc_id))
 			return 0;
 
 		for (uint32_t format_idx = 0; format_idx < plane->drm_plane.count_formats;
@@ -504,8 +504,8 @@ static int init_plane_any_format(struct atomictest_context *ctx, struct atomicte
 							    GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR))
 				continue;
 
-			if (init_plane(ctx, plane, plane->drm_plane.formats[format_idx], x, y, w,
-					h, crtc_id) == 0)
+			if (!init_plane(ctx, plane, plane->drm_plane.formats[format_idx], x, y, w,
+					h, crtc_id))
 				return 0;
 		}
 	}
