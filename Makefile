@@ -1,4 +1,4 @@
-# Copyright (c) 2012 The Chromium OS Authors. All rights reserved.
+# Copyright 2012 The ChromiumOS Authors
 # Use of this source code is governed by a BSD-style license that can be
 # found in the LICENSE file.
 
@@ -22,6 +22,7 @@ all: \
 	CC_BINARY(mtk_dram_tool) \
 	CC_BINARY(drm_cursor_test) \
 	CC_BINARY(gamma_test) \
+	CC_BINARY(gbmtest) \
 	CC_BINARY(linear_bo_test) \
 	CC_BINARY(mali_stats) \
 	CC_BINARY(mapped_access_perf_test) \
@@ -37,7 +38,6 @@ all: \
 	CC_BINARY(v4l2_stateful_decoder) \
 	CC_BINARY(v4l2_stateful_encoder) \
 
-
 ifeq ($(USE_VULKAN),1)
 all: CC_BINARY(vk_glow)
 endif
@@ -48,6 +48,8 @@ CC_BINARY(mtk_dram_tool): mtk_dram_tool.o
 
 CC_BINARY(null_platform_test): null_platform_test.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
 CC_BINARY(null_platform_test): LDLIBS += $(DRM_LIBS)
+
+CC_BINARY(gbmtest): gbmtest.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
 
 CC_BINARY(dmabuf_test): dmabuf_test.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
 CC_BINARY(mmap_test): mmap_test.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
