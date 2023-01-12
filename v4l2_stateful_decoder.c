@@ -28,15 +28,6 @@
 #include "bs_drm.h"
 #include "v4l2_macros.h"
 
-// TODO(b/170469464): The UBWC format is changing from Q128 to Q08C
-// The defines for this are in include/uapi/linux/videodev2.h
-// When the revert of the CHROMIUM patches lands there will be a gap
-// where the define changes.  The new and old defines are copied here
-// until after the kernel patches land.
-#ifndef V4L2_PIX_FMT_NV12_UBWC
-#define V4L2_PIX_FMT_NV12_UBWC        v4l2_fourcc('Q', '1', '2', '8')
-#endif
-
 #ifndef V4L2_PIX_FMT_QC08C
 #define V4L2_PIX_FMT_QC08C    v4l2_fourcc('Q', '0', '8', 'C') /* Qualcomm 8-bit compressed */
 #endif
@@ -702,7 +693,6 @@ int setup_CAPTURE(struct gbm_device* gbm,
     // |CAPTURE_queue| might be configured for Q08C, in that case we simply
     // ignore it; we'll force |CAPTURE_queue->fourcc| further below.
     assert(CAPTURE_queue->fourcc == fmt.fmt.pix_mp.pixelformat ||
-           fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12_UBWC ||
            fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_QC08C);
 
     // Oftentimes the driver will give us back the appropriately aligned sizes.
@@ -1440,8 +1430,7 @@ int main(int argc, char* argv[]) {
           LOG_INFO("User-provided CAPTURE format: %s",
               fourcc_to_string(uncompressed_fourcc, fourcc));
 
-          if (uncompressed_fourcc == V4L2_PIX_FMT_NV12_UBWC ||
-              uncompressed_fourcc == V4L2_PIX_FMT_QC08C) {
+          if (uncompressed_fourcc == V4L2_PIX_FMT_QC08C) {
             modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
             LOG_INFO("CAPTURE format is compressed, setting modifier.");
           }
