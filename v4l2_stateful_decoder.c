@@ -1483,7 +1483,7 @@ int main(int argc, char* argv[]) {
 
   int drm_device_fd = -1;
   struct gbm_device* gbm = NULL;
-  const use_gbm = V4L2_MEMORY_DMABUF == CAPTURE_memory;
+  const bool use_gbm = V4L2_MEMORY_DMABUF == CAPTURE_memory;
   if (use_gbm) {
     drm_device_fd = bs_drm_open_main_display();
     if (drm_device_fd < 0) {
