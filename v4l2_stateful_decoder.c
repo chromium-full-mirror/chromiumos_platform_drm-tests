@@ -80,6 +80,9 @@ struct queue {
   // plane of an MMAP buffer. Copied from the V4L2 multi-planar format
   // structure.
   uint32_t bytes_per_line[VIDEO_MAX_PLANES];
+  // Size of the plane in bytes. Copied from the V4L2 multi-planar format
+  // structure.
+  size_t size_image[VIDEO_MAX_PLANES];
   uint32_t cnt;
   uint32_t num_planes;
   enum v4l2_memory memory;  // V4L2_MEMORY_(MMAP|DMABUF) etc.
@@ -684,12 +687,6 @@ int setup_CAPTURE(struct gbm_device* gbm,
       LOG_DEBUG("CAPTURE queue provided adjusted num planes: %d --> %d",
         CAPTURE_queue->num_planes, fmt.fmt.pix_mp.num_planes);
     }
-    CAPTURE_queue->num_planes = fmt.fmt.pix_mp.num_planes;
-
-    for (int i = 0; i < CAPTURE_queue->num_planes; ++i) {
-      CAPTURE_queue->bytes_per_line[i] =
-        fmt.fmt.pix_mp.plane_fmt[i].bytesperline;
-    }
 
     char fourcc[FOURCC_SIZE + 1];
     LOG_INFO("CAPTURE queue: width=%d, height=%d, format=%s, num_planes=%d",
@@ -752,6 +749,15 @@ int setup_CAPTURE(struct gbm_device* gbm,
     // fathom device capabilities and to approach parameters acceptable for
     // both the application and driver.
     assert(fmt.fmt.pix_mp.pixelformat == CAPTURE_queue->fourcc);
+
+    CAPTURE_queue->num_planes = fmt.fmt.pix_mp.num_planes;
+
+    for (int i = 0; i < CAPTURE_queue->num_planes; ++i) {
+      CAPTURE_queue->bytes_per_line[i] =
+        fmt.fmt.pix_mp.plane_fmt[i].bytesperline;
+      CAPTURE_queue->size_image[i] =
+        fmt.fmt.pix_mp.plane_fmt[i].sizeimage;
+    }
   }
 
   // 5. (Optional) Sets the coded frame interval on the CAPTURE queue via
@@ -859,25 +865,32 @@ void write_frame_to_disk(const struct file_output* file_output,
     return;
   }
 
-  if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_YUV420M) {
-    // Technically this path could also support V4L2_PIX_FMT_YVU420 and other
-    // I420 variations, but it's not properly tested/commonly utilized.
-    const size_t num_coded_pixels = CAPTURE_queue->coded_width *
-                                    CAPTURE_queue->coded_height;
-    uint8_t* y_buffer = CAPTURE_queue->buffers[queue_index].start[0];
-    fwrite(y_buffer, num_coded_pixels, 1, fp);
-
-    for (uint32_t i = 1; i < CAPTURE_queue->num_planes; ++i) {
-      const size_t uv_plane_size = ((CAPTURE_queue->coded_width + 1) / 2) *
-                                   ((CAPTURE_queue->coded_height + 1) / 2);
-      uint8_t* chroma_buffer = CAPTURE_queue->buffers[queue_index].start[i];
-      fwrite(chroma_buffer, uv_plane_size, 1, fp);
-    }
-  } else {
+  if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12) {
     struct data_buffer buffer_i420 =
       map_buffers_and_convert_to_i420(CAPTURE_queue, queue_index);
 
     fwrite(buffer_i420.data, buffer_i420.size, 1, fp);
+    free(buffer_i420.data);
+  } else {
+    if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
+      struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
+      int bo_fd = gbm_bo_get_fd(bo);
+      assert(bo_fd > 0);
+      off_t buffer_size = lseek(bo_fd, 0, SEEK_END);
+      lseek(bo_fd, 0, SEEK_SET);
+
+      void* buffer = mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
+
+      fwrite(buffer, buffer_size, 1, fp);
+
+      munmap(buffer, buffer_size);
+      close(bo_fd);
+    } else {
+      for (uint32_t i = 0; i < CAPTURE_queue->num_planes; ++i) {
+        fwrite(CAPTURE_queue->buffers[queue_index].start[i],
+          CAPTURE_queue->size_image[i], 1, fp);
+      }
+    }
   }
 
   if (FILE_MULTIPLE == file_output->type)
