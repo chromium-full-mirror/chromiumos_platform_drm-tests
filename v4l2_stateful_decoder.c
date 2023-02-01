@@ -44,9 +44,6 @@ static const uint32_t kInvalidFrameRate = 0;
 // Trogdor when a decode stalls.
 static const int kMaxRetryCount = 1 << 24;
 
-static const char* kImageProcessorDevice = "/dev/image-proc0";
-static const int kInvalidBufferIndex = -1;
-
 static uint32_t kPreferredUncompressedFourCCs[] = {V4L2_PIX_FMT_NV12,
                                                    V4L2_PIX_FMT_MT21C};
 
@@ -652,34 +649,11 @@ int queue_buffer_CAPTURE(struct queue* queue, uint32_t index) {
 int setup_CAPTURE(struct gbm_device* gbm,
                   struct queue* CAPTURE_queue,
                   uint64_t modifier,
-                  uint32_t coded_frame_rate,
-                  bool use_CAPTURE_queue_dimensions) {
+                  uint32_t coded_frame_rate) {
   int ret = 0;
 
-  // In stateful decoders, we insert some encoded chunks in the OUTPUT queue and
-  // then query (via VIDIOC_G_FMT) the associated CAPTURE queue to learn e.g.
-  // the decoded dimensions; this follows the process detailed in [1,2]. For the
-  // Image Processor (MDP) case, we don't want/need to queue frames first,
-  // because we know the dimensions from the decoding proper. So we simply set
-  // the format in the |CAPTURE_queue| first.
-
-  // [1] https://www.kernel.org/doc/html/v5.4/media/uapi/v4l/dev-decoder.html#initialization
-  // [2] https://www.kernel.org/doc/html/v5.4/media/uapi/v4l/dev-decoder.html#capture-setup
-  if (use_CAPTURE_queue_dimensions) {
-    struct v4l2_format fmt;
-    memset(&fmt, 0, sizeof(fmt));
-    fmt.type = CAPTURE_queue->type;
-    fmt.fmt.pix_mp.pixelformat = CAPTURE_queue->fourcc;
-    fmt.fmt.pix_mp.width = CAPTURE_queue->display_area.width;
-    fmt.fmt.pix_mp.height = CAPTURE_queue->display_area.height;
-
-    ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_FMT, &fmt);
-    if (ret != 0)
-      LOG_ERROR("CAPTURE queue: VIDIOC_S_FMT failed: %s.", strerror(errno));
-  }
-
-  // 1. "Call VIDIOC_G_FMT() on the CAPTURE queue to get format for the
-  // destination buffers parsed/decoded from the bytestream.""
+  // 1. Call VIDIOC_G_FMT() on the CAPTURE queue to get format for the
+  // destination buffers parsed/decoded from the bytestream.
   if (!ret) {
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));
@@ -754,9 +728,9 @@ int setup_CAPTURE(struct gbm_device* gbm,
   }
 
 
-  // 4. "Optional. Set the CAPTURE format via VIDIOC_S_FMT() on the CAPTURE
+  // 4. Optional. Set the CAPTURE format via VIDIOC_S_FMT() on the CAPTURE
   // queue. The client may choose a different format than selected/suggested by
-  // the decoder in VIDIOC_G_FMT()."
+  // the decoder in VIDIOC_G_FMT().
   if (!ret) {
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));
@@ -919,12 +893,12 @@ int dequeue_buffer(struct queue* queue,
   memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
   v4l2_buffer.type = queue->type;
   v4l2_buffer.memory = queue->memory;
-    // "Applications call the VIDIOC_DQBUF ioctl to dequeue [...]. They just
-    // set the type, memory and reserved fields of a struct v4l2_buffer as
-    // above, when VIDIOC_DQBUF is called with a pointer to this structure the
-    // driver fills the remaining fields or returns an error code."
-    // https://www.kernel.org/doc/html/v4.19/media/uapi/v4l/vidioc-qbuf.html
-    // Mediatek 8173 however ,needs the |length| field filed in.
+  // "Applications call the VIDIOC_DQBUF ioctl to dequeue [...]. They just
+  // set the type, memory and reserved fields of a struct v4l2_buffer as
+  // above, when VIDIOC_DQBUF is called with a pointer to this structure the
+  // driver fills the remaining fields or returns an error code."
+  // https://www.kernel.org/doc/html/v4.19/media/uapi/v4l/vidioc-qbuf.html
+  // Mediatek 8173 however ,needs the |length| field filed in.
   v4l2_buffer.length = queue->num_planes;
 
   v4l2_buffer.m.planes = planes;
@@ -986,160 +960,6 @@ int finish_drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
   return ret;
 }
 
-typedef bool (*process_opaque_frame_function)(struct queue*,
-                                              uint32_t,
-                                              struct queue*,
-                                              struct queue*,
-                                              int*);
-
-
-// This function gets a single opaque frame from |CAPTURE_queue| and enqueues it
-// in the |mdp_OUTPUT_queue| to be processed by the MDP/Image Processor; it then
-// waits for it to produce a single "clear" frame in |mdp_CAPTURE_queue|.
-bool process_opaque_frame(struct queue* CAPTURE_queue,
-                          uint32_t CAPTURE_queue_index,
-                          struct queue* mdp_OUTPUT_queue,
-                          struct queue* mdp_CAPTURE_queue,
-                          int* mdp_CAPTURE_queue_dequeued_buffer_index)
-{
-  assert(CAPTURE_queue->memory == V4L2_MEMORY_MMAP);
-  assert(CAPTURE_queue->fourcc == mdp_OUTPUT_queue->fourcc);
-  assert(mdp_OUTPUT_queue->memory == V4L2_MEMORY_DMABUF);
-
-  // Insert the opaque buffer from the |CAPTURE_queue| into the Image Processor
-  // via the |mdp_OUTPUT_queue|. |CAPTURE_queue| and |mdp_OUTPUT_queue| are
-  // supposed to be of type V4L2_MEMORY_MMAP and V4L2_MEMORY_DMABUF, resp. To
-  // avoid a copy, we extract the DmaBufs under |CAPTURE_queue| using
-  // VIDIOC_EXPBUF and "import" them into |mdp_OUTPUT_queue|.
-  {
-    struct v4l2_buffer v4l2_buffer;
-    memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
-
-    // Re-use the CAPTURE_queue index. This is for simplicity in this file:
-    // every time we dequeue an opaque frame from |CAPTURE_queue| we enqueue it
-    // in |mdp_OUTPUT_queue|.
-    v4l2_buffer.index = CAPTURE_queue_index;
-    v4l2_buffer.type = mdp_OUTPUT_queue->type;
-    v4l2_buffer.bytesused = 0; // "unused (set to 0) for multiplanar buffers"
-    v4l2_buffer.flags = V4L2_BUF_FLAG_QUEUED | V4L2_BUF_FLAG_TIMESTAMP_COPY;
-    v4l2_buffer.memory = mdp_OUTPUT_queue->memory;
-    // |length|:"number of elements in the planes array for multi-plane buffers"
-    v4l2_buffer.length = mdp_OUTPUT_queue->num_planes;
-    // Note: although later specs mandated that |v4l2_buffer.timestamp| had to
-    // be filled in, it doesn't seem necessary in older kernels.
-    struct v4l2_plane planes[VIDEO_MAX_PLANES] = { 0 };
-    v4l2_buffer.m.planes = planes;
-
-    for (int i = 0; i < mdp_OUTPUT_queue->num_planes; ++i) {
-      // Export the DmaBuf out of the |CAPTURE_queue| |queue_index| and use it
-      // for |v4l2_buffer|.
-      struct v4l2_exportbuffer expbuf;
-      memset(&expbuf, 0, sizeof(expbuf));
-      expbuf.type = CAPTURE_queue->type;
-      expbuf.index = CAPTURE_queue_index;
-      expbuf.plane = i;
-      const int ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_EXPBUF, &expbuf);
-      if (ret != 0) {
-        LOG_ERROR("Image Processor: mdp_OUTPUT_queue VIDIOC_EXPBUF failed: %s.",
-            strerror(errno));
-        return false;
-      }
-
-      v4l2_buffer.m.planes[i].m.fd = expbuf.fd;
-
-      v4l2_buffer.m.planes[i].length =
-          CAPTURE_queue->buffers[CAPTURE_queue_index].length[i];
-      v4l2_buffer.m.planes[i].bytesused =
-          CAPTURE_queue->buffers[CAPTURE_queue_index].length[i];
-      assert(v4l2_buffer.m.planes[i].data_offset == 0);
-    }
-
-    const int ret = ioctl(mdp_OUTPUT_queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
-
-    // VIDIOC_EXPBUF opens file descriptors that need to be closed.
-    for (int i = 0; i < mdp_OUTPUT_queue->num_planes; ++i) {
-      close(v4l2_buffer.m.planes[i].m.fd);
-    }
-
-    if (ret != 0) {
-      LOG_ERROR("Image Processor: mdp_OUTPUT_queue VIDIOC_QBUF failed: %s.",
-          strerror(errno));
-      return false;
-    } else {
-      LOG_DEBUG("Image Processor: enqueued frame in mdp_OUTPUT_queue with index"
-          " %d.", CAPTURE_queue_index);
-    }
-  }
-
-  // Try to dequeue a "clear" buffer from |mdp_CAPTURE_queue|. We try as long as
-  // VIDIOC_DQBUF returns EAGAIN, indicating that the device is busy (hopefully
-  // converting our opaque frames). If a buffer is dequeued, we reenqueue it
-  // immediately (note that it won't be reused until a couple of calls later
-  // since the indexes are used in round-robin fashion).
-  {
-    struct v4l2_buffer v4l2_buffer;
-    memset(&v4l2_buffer, 0, sizeof(v4l2_buffer));
-    v4l2_buffer.type = mdp_CAPTURE_queue->type;
-    v4l2_buffer.memory = mdp_CAPTURE_queue->memory;
-    struct v4l2_plane planes[VIDEO_MAX_PLANES] = { 0 };
-    v4l2_buffer.m.planes = planes;
-
-    v4l2_buffer.length = mdp_CAPTURE_queue->num_planes;
-
-    int num_tries = kMaxRetryCount;
-    bool keep_trying = false;
-    do {
-      const int ret =
-          ioctl(mdp_CAPTURE_queue->v4lfd, VIDIOC_DQBUF, &v4l2_buffer);
-      if (ret != 0 && errno != EAGAIN) {
-        LOG_ERROR("Image Processor: mdp_CAPTURE_queue VIDIOC_DQBUF failed.");
-        return false;
-      }
-      keep_trying = (ret != 0 && errno == EAGAIN);
-      num_tries--;
-    } while(keep_trying && num_tries != 0);
-
-    if (num_tries == 0) {
-      LOG_ERROR("Image Processor: timed out waiting for a clear frame.");
-      return false;
-    }
-
-    LOG_DEBUG("Image Processor: dequeued frame from mdp_CAPTURE_queue with "
-        "index %d.", v4l2_buffer.index);
-    *mdp_CAPTURE_queue_dequeued_buffer_index = v4l2_buffer.index;
-
-    const int ret =
-        ioctl(mdp_CAPTURE_queue->v4lfd, VIDIOC_QBUF, &v4l2_buffer);
-    if (ret != 0) {
-      LOG_ERROR("Image Processor: mdp_CAPTURE_queue VIDIOC_QBUF failed: %s.",
-          strerror(errno));
-      return false;
-    } else {
-      LOG_DEBUG("Image Processor: (re)enqueued frame in mdp_CAPTURE_queue "
-          "with index %d.", v4l2_buffer.index);
-    }
-  }
-
-  // If we're here, we have dequeued a "clear" buffer from |mdp_CAPTURE_queue|;
-  // dequeue a buffer from |mdp_OUTPUT_queue|: the MDP has finished processing
-  // one and we can reuse that slot in future function calls.
-  {
-    uint32_t index = 0;
-    const int ret = dequeue_buffer(mdp_OUTPUT_queue, &index, /*bytesused=*/NULL,
-                                   /*flags=*/NULL);
-    if (ret != 0) {
-      LOG_ERROR("Image Processor: mdp_OUTPUT_queue VIDIOC_DQBUF failed: %s.",
-          strerror(errno));
-      return false;
-    } else {
-      LOG_DEBUG("Image Processor: (re)dequeued frame in mdp_OUTPUT_queue with "
-          "index %d.", index);
-    }
-  }
-
-  return true;
-}
-
 // From 4.5.1.9. Dynamic Resolution Change
 // This is called after a source change event is caught, dequeued,
 // and all pending buffers in the |CAPTURE_queue| are drained.
@@ -1171,8 +991,7 @@ int handle_dynamic_resolution_change(struct gbm_device* gbm,
   // setup_CAPTURE will call VIDIOC_STREAMON as part of the capture setup
   // sequence, which starts capture queue streaming.
   if (!ret) {
-    ret = setup_CAPTURE(gbm, CAPTURE_queue, modifier, kInvalidFrameRate,
-      /*use_CAPTURE_queue_dimensions=*/false);
+    ret = setup_CAPTURE(gbm, CAPTURE_queue, modifier, kInvalidFrameRate);
   }
 
   return ret;
@@ -1184,10 +1003,7 @@ int decode(struct gbm_device* gbm,
            uint64_t modifier,
            const struct file_output *file_output,
            uint32_t frames_to_decode,
-           const struct per_frame_md5_hash_logs* md5_hash_logs,
-           process_opaque_frame_function process_opaque_frame_fp,
-           struct queue* mdp_OUTPUT_queue,
-           struct queue* mdp_CAPTURE_queue) {
+           const struct per_frame_md5_hash_logs* md5_hash_logs) {
   int ret = 0;
 
   // If no buffers have been dequeued for more than |kMaxRetryCount| retries, we
@@ -1238,42 +1054,12 @@ int decode(struct gbm_device* gbm,
             CAPTURE_queue->displayed_frames < frames_to_decode) {
           CAPTURE_queue->displayed_frames++;
 
-          if (process_opaque_frame_fp) {
-            int mdp_CAPTURE_queue_buffer_index = kInvalidBufferIndex;
-            assert(V4L2_MEMORY_MMAP == CAPTURE_queue->memory);
-            if (!process_opaque_frame_fp(CAPTURE_queue,
-                                        index,
-                                        mdp_OUTPUT_queue,
-                                        mdp_CAPTURE_queue,
-                                        &mdp_CAPTURE_queue_buffer_index)){
-              LOG_ERROR("Image Processor failed.");
-              return -1;
-            }
-            mdp_CAPTURE_queue->displayed_frames++;
-            if ((FILE_NONE != file_output->type) &&
-                mdp_CAPTURE_queue_buffer_index != kInvalidBufferIndex) {
-              write_frame_to_disk(file_output,
-                                  mdp_CAPTURE_queue,
-                                  mdp_CAPTURE_queue_buffer_index);
-            }
+          if (FILE_NONE != file_output->type)
+            write_frame_to_disk(file_output, CAPTURE_queue, index);
 
-            if (md5_hash_logs->enabled &&
-                mdp_CAPTURE_queue_buffer_index != kInvalidBufferIndex) {
-              compute_and_print_md5hash(
-                  mdp_CAPTURE_queue->buffers[mdp_CAPTURE_queue_buffer_index]
-                      .start[0],
-                  mdp_CAPTURE_queue->buffers[mdp_CAPTURE_queue_buffer_index]
-                      .length[0],
-                  CAPTURE_queue->displayed_frames, md5_hash_logs);
-            }
-          } else {
-            if (FILE_NONE != file_output->type)
-              write_frame_to_disk(file_output, CAPTURE_queue, index);
-
-            if (md5_hash_logs->enabled)
-              map_buffers_and_calculate_md5hash(CAPTURE_queue, index,
-                                                md5_hash_logs);
-          }
+          if (md5_hash_logs->enabled)
+            map_buffers_and_calculate_md5hash(CAPTURE_queue, index,
+                                              md5_hash_logs);
         } else {
           LOG_DEBUG("Buffer set %s%s%s.",
                     is_flag_error_set ? "V4L2_BUF_FLAG_ERROR" : "",
@@ -1534,81 +1320,7 @@ int main(int argc, char* argv[]) {
                                 .displayed_frames = 0,
                                 .is_streaming = false};
   if (!ret) {
-    ret = setup_CAPTURE(gbm, &CAPTURE_queue, modifier, frame_rate,
-      /*use_CAPTURE_queue_dimensions=*/false);
-  }
-
-  process_opaque_frame_function process_opaque_frame_fp = NULL;
-  int mdp_fd = -1;
-  struct queue* mdp_OUTPUT_queue = NULL;
-  struct queue* mdp_CAPTURE_queue = NULL;
-  if (!ret && uncompressed_fourcc == V4L2_PIX_FMT_MT21C) {
-    char fourcc[FOURCC_SIZE + 1];
-    fourcc_to_string(uncompressed_fourcc, fourcc);
-    LOG_INFO("Image Processor: needed, %s is an opaque format.", fourcc);
-    // MT21C is a specific opaque MediaTek format and seems, sadly,
-    // undocumented, forcing the use of a specific ImageProcessor, called by
-    // MediaTek Media Data Path (MDP) to produce a "clear" format. This format
-    // was controversial:
-    // https://groups.google.com/g/linux.kernel/c/4nijzmKfdak/m/pWUN7HQBBAAJ
-    mdp_fd = open(kImageProcessorDevice, O_RDWR | O_NONBLOCK | O_CLOEXEC);
-    if (mdp_fd < 0) {
-      LOG_FATAL("Image Processor: Unable to open dev file: %s.",
-          kImageProcessorDevice);
-    }
-    query_driver(mdp_fd);
-
-    // MDP claims to support (from v4l2-ctl):
-    //  [0]: 'NM12' (Y/CbCr 4:2:0 (N-C))
-    //  [1]: 'YM12' (Planar YUV 4:2:0 (N-C))
-    //  [2]: 'YV12' (Planar YVU 4:2:0)
-    // Chrome uses V4L2_PIX_FMT_YVU420 (YV12).
-    uint32_t readable_fourcc = V4L2_PIX_FMT_YUV420M ;
-    const uint32_t readable_fourcc_num_planes = 3;
-    if (!capabilities(mdp_fd, kImageProcessorDevice, uncompressed_fourcc,
-        &readable_fourcc)) {
-      LOG_FATAL("Image processor: Expected formats not supported.");
-    }
-    assert(readable_fourcc == V4L2_PIX_FMT_YUV420M);
-
-    char mdp_fourcc[FOURCC_SIZE + 1];
-    fourcc_to_string(readable_fourcc, mdp_fourcc);
-    LOG_INFO("Image Processor: OUTPUT format %s --> CAPTURE format: %s",
-        fourcc, mdp_fourcc);
-
-    // |mdp_OUTPUT_queue| takes decoded, opaque frames.
-    mdp_OUTPUT_queue = malloc(sizeof(struct queue));
-    mdp_OUTPUT_queue->v4lfd = mdp_fd;
-    mdp_OUTPUT_queue->type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
-    mdp_OUTPUT_queue->fourcc = uncompressed_fourcc;
-    mdp_OUTPUT_queue->num_planes = 2;
-    mdp_OUTPUT_queue->memory = V4L2_MEMORY_DMABUF;
-    mdp_OUTPUT_queue->displayed_frames = 0;
-    mdp_OUTPUT_queue->is_streaming = false;
-    int ret = setup_OUTPUT(mdp_OUTPUT_queue, &CAPTURE_queue.coded_width,
-        &CAPTURE_queue.coded_height);
-    if (ret < 0)
-      LOG_FATAL("Image Processor: Unable to configure OUTPUT_queue.");
-
-    if (!apply_selection_to_queue(mdp_OUTPUT_queue, CAPTURE_queue.display_area))
-      LOG_FATAL("Image Processor: Unable to set SELECTION for OUTPUT_queue.");
-
-    // |mdp_CAPTURE_queue| has "clear" and fully mappable and readable frames.
-    mdp_CAPTURE_queue = malloc(sizeof(struct queue));
-    mdp_CAPTURE_queue->v4lfd = mdp_fd;
-    mdp_CAPTURE_queue->type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-    mdp_CAPTURE_queue->fourcc = readable_fourcc;
-    mdp_CAPTURE_queue->num_planes = readable_fourcc_num_planes;
-    mdp_CAPTURE_queue->memory = V4L2_MEMORY_MMAP;
-    mdp_CAPTURE_queue->display_area = CAPTURE_queue.display_area;
-    mdp_CAPTURE_queue->displayed_frames = 0;
-    mdp_CAPTURE_queue->is_streaming = false;
-    ret = setup_CAPTURE(gbm, mdp_CAPTURE_queue, DRM_FORMAT_MOD_NONE,
-        /*frame_rate=*/0, /*use_CAPTURE_queue_dimensions=*/ true);
-    if (ret < 0)
-      LOG_FATAL("Image Processor: Unable to configure CAPTURE_queue.");
-
-    process_opaque_frame_fp = &process_opaque_frame;
+    ret = setup_CAPTURE(gbm, &CAPTURE_queue, modifier, frame_rate);
   }
 
   if (subscribe_to_event(v4lfd, V4L2_EVENT_SOURCE_CHANGE, 0 /* id */))
@@ -1616,20 +1328,13 @@ int main(int argc, char* argv[]) {
 
   if (!ret) {
     ret = decode(gbm, &CAPTURE_queue, &OUTPUT_queue, modifier,
-                 &file_output, frames_to_decode, &md5_hash_logs,
-                 process_opaque_frame_fp, mdp_OUTPUT_queue, mdp_CAPTURE_queue);
+                 &file_output, frames_to_decode, &md5_hash_logs);
   }
 
   if (file_output.file_prefix)
     free(file_output.file_prefix);
   if (file_output.single_fp)
     fclose(file_output.single_fp);
-  if(mdp_OUTPUT_queue)
-    free(mdp_OUTPUT_queue);
-  if (mdp_CAPTURE_queue)
-    free(mdp_CAPTURE_queue);
-  if (mdp_fd != -1)
-    close(mdp_fd);
 
   cleanup_queue(&OUTPUT_queue);
   cleanup_queue(&CAPTURE_queue);
