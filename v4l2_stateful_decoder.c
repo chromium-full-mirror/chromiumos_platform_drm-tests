@@ -113,6 +113,7 @@ struct file_output {
   FILE* single_fp;
   char* file_prefix;
   enum file_output_type type;
+  bool raw;
 };
 
 bool is_vp9(uint32_t fourcc) {
@@ -865,13 +866,7 @@ void write_frame_to_disk(const struct file_output* file_output,
     return;
   }
 
-  if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12) {
-    struct data_buffer buffer_i420 =
-      map_buffers_and_convert_to_i420(CAPTURE_queue, queue_index);
-
-    fwrite(buffer_i420.data, buffer_i420.size, 1, fp);
-    free(buffer_i420.data);
-  } else {
+  if (file_output->raw) {
     if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
       struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
       int bo_fd = gbm_bo_get_fd(bo);
@@ -891,6 +886,14 @@ void write_frame_to_disk(const struct file_output* file_output,
           CAPTURE_queue->size_image[i], 1, fp);
       }
     }
+  } else if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12) {
+    struct data_buffer buffer_i420 =
+      map_buffers_and_convert_to_i420(CAPTURE_queue, queue_index);
+
+    fwrite(buffer_i420.data, buffer_i420.size, 1, fp);
+    free(buffer_i420.data);
+  } else {
+    LOG_ERROR("No conversion to I420 for this file. Unable to write to disk.");
   }
 
   if (FILE_MULTIPLE == file_output->type)
@@ -1145,6 +1148,9 @@ static void print_help(const char* argv0) {
   printf("  -f, --file        ivf file to decode\n");
   printf("  -w, --write       output visible frames in I420 format "
                              "to individual files (one frame per file)\n");
+  printf("  -b, --raw         output visible frames in original format "
+                             "one frame per file. The entire buffer is written "
+                             "as is without any cropping or conversion.\n");
   printf("  -s, --single      file name to output all visible frames in I420 "
                              "format to\n");
   printf("  -m, --max         max number of visible frames to decode\n");
@@ -1170,6 +1176,7 @@ static const struct option longopts[] = {
     {"md5", optional_argument, NULL, 'd'},
     {"frame_rate", required_argument, NULL, 'r'},
     {"single", required_argument, NULL, 's'},
+    {"raw", no_argument, NULL, 'b'},
     {0, 0, 0, 0},
 };
 
@@ -1181,12 +1188,12 @@ int main(int argc, char* argv[]) {
   uint64_t modifier = DRM_FORMAT_MOD_LINEAR;
   uint32_t uncompressed_fourcc = V4L2_PIX_FMT_INVALID;
   enum v4l2_memory CAPTURE_memory = V4L2_MEMORY_DMABUF;
-  struct file_output file_output = {};
+  struct file_output file_output = {.raw = false};
   struct per_frame_md5_hash_logs md5_hash_logs = {.enabled = false,
                                                   .output_file_enabled = false,
                                                   .output_fp = NULL};
 
-  while ((c = getopt_long(argc, argv, "f:m:wac:l:d::r:s:", longopts, NULL))
+  while ((c = getopt_long(argc, argv, "f:m:wbac:l:d::r:s:", longopts, NULL))
           != -1) {
     switch (c) {
       case 'f':
@@ -1209,6 +1216,8 @@ int main(int argc, char* argv[]) {
             LOG_FATAL("Unable to create output yuv file: %s.", optarg);
         }
         break;
+      case 'b':
+        file_output.raw = true;
       case 'w':
         if (file_output.type != FILE_NONE) {
           LOG_FATAL("Can only write out single OR multiple files, not both");
