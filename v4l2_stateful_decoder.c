@@ -383,6 +383,67 @@ struct data_buffer nv12_to_i420(struct v4l2_rect display_area,
   return buffer_out;
 }
 
+// P010 to I010 conversion.
+// Does the same deinterleaving conversion that |nv12_to_i420| does.
+// P010 use the msb of the 16 bits.  In order to convert to I010 each
+// pixel needs to be downshifted 6 (16 - 10).
+struct data_buffer p010_to_i010(struct v4l2_rect display_area,
+                                uint32_t buffer_width_in_pixels,
+                                uint32_t buffer_height,
+                                uint8_t* buffer_in) {
+
+  const size_t y_plane_size_in_pixels = display_area.width *
+                                        display_area.height * 2;
+
+  // Both P010 and I010 are 4:2:0, so the U and V planes are downsampled by a
+  // factor of two in width and height respective to the Y plane.
+  // When an image dimension is odd, round the downsampled dimension up.
+  const size_t uv_plane_left = display_area.left / 2;
+  const size_t uv_plane_top = display_area.top / 2;
+  const size_t uv_plane_width = (display_area.width + 1) / 2;
+  const size_t uv_plane_height = (display_area.height + 1) / 2;
+  const size_t uv_plane_size_in_pixels = uv_plane_width * uv_plane_height * 2;
+
+  struct data_buffer buffer_out = {.data = NULL,
+                                   .size = y_plane_size_in_pixels +
+                                           2 * uv_plane_size_in_pixels};
+  buffer_out.data = malloc(sizeof(uint8_t) * buffer_out.size);
+  assert(buffer_out.data);
+  memset(buffer_out.data, 0, sizeof(uint8_t) * buffer_out.size);
+
+  uint16_t* y_plane_out = (uint16_t*)buffer_out.data;
+  uint16_t const* y_plane_in = (uint16_t*)buffer_in;
+  y_plane_in += display_area.left;
+  y_plane_in += display_area.top * buffer_width_in_pixels >> 1;
+  for (int y = 0; y < display_area.height; ++y) {
+    for (int x = 0 ; x < display_area.width; ++x) {
+      y_plane_out[x] = y_plane_in[x] >> 6;
+    }
+    y_plane_out += display_area.width;
+    y_plane_in += buffer_width_in_pixels >> 1;
+  }
+
+  uint16_t* u_plane_out = (uint16_t*)(buffer_out.data + y_plane_size_in_pixels);
+  uint16_t* v_plane_out = u_plane_out + (uv_plane_size_in_pixels >> 1);
+  const size_t uv_plane_offset = buffer_width_in_pixels * buffer_height;
+  uint16_t const* uv_plane_in = (uint16_t*)(buffer_in + uv_plane_offset);
+
+  uv_plane_in += uv_plane_left;
+  uv_plane_in += uv_plane_top * buffer_width_in_pixels >> 1;
+
+  for (int row = 0; row < uv_plane_height; ++row) {
+    for (int column = 0; column < uv_plane_width; ++column) {
+      u_plane_out[column] = uv_plane_in[2 * column] >> 6;
+      v_plane_out[column] = uv_plane_in[2 * column + 1] >> 6;
+    }
+    u_plane_out += uv_plane_width;
+    v_plane_out += uv_plane_width;
+    uv_plane_in += buffer_width_in_pixels >> 1;
+  }
+
+  return buffer_out;
+}
+
 void compute_and_print_md5hash(const void *data,
                                size_t len,
                                uint32_t frame_index,
@@ -415,8 +476,6 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
                                                    uint32_t queue_index) {
   assert(CAPTURE_queue->memory == V4L2_MEMORY_DMABUF ||
          CAPTURE_queue->memory == V4L2_MEMORY_MMAP);
-  // TODO: only handles 8 bit pixels
-  assert(CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12);
 
   // Maps the frame buffer into |buffer_nv12| and get the buffer's stride and
   // size metadata for cropping and deinterleaving the image.
@@ -456,10 +515,19 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
 
   // Libvpx golden md5 hashes are calculated in I420 format.
   // Deinterleave |buffer_nv12| and apply the display area.
-  struct data_buffer buffer_i420 = nv12_to_i420(CAPTURE_queue->display_area,
-                                                buffer_bytes_per_line,
-                                                buffer_height,
-                                                buffer_nv12);
+  struct data_buffer buffer_i420 = {};
+
+  if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12) {
+    buffer_i420 = nv12_to_i420(CAPTURE_queue->display_area,
+                               buffer_bytes_per_line,
+                               buffer_height,
+                               buffer_nv12);
+  } else {
+    buffer_i420 = p010_to_i010(CAPTURE_queue->display_area,
+                               buffer_bytes_per_line,
+                               buffer_height,
+                               buffer_nv12);
+  }
 
   if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
     munmap(buffer_nv12, buffer_size);
@@ -886,7 +954,8 @@ void write_frame_to_disk(const struct file_output* file_output,
           CAPTURE_queue->size_image[i], 1, fp);
       }
     }
-  } else if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12) {
+  } else if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12 ||
+             CAPTURE_queue->fourcc == V4L2_PIX_FMT_P010) {
     struct data_buffer buffer_i420 =
       map_buffers_and_convert_to_i420(CAPTURE_queue, queue_index);
 
