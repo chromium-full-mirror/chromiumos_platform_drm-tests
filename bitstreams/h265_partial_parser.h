@@ -86,6 +86,7 @@ typedef struct H265Nalu {
   const uint8_t* data;
   size_t size;
 
+  uint8_t forbidden_bit;
   uint8_t nal_unit_type;
   uint8_t nuh_layer_id;
   uint8_t nuh_temporal_id_plus1;

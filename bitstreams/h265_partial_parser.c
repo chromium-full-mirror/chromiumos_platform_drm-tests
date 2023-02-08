@@ -55,9 +55,7 @@ H265Nalu parse_h265_nalu(uint8_t* curr_pos, uint8_t* end_pos) {
   BitfieldStream bfs = bitfield_stream_init(nalu.data + NALU_SIGNATURE_SIZE,
                                             nalu.data + nalu.size);
 
-  uint8_t forbidden_bit = 0;
-  bitfield_stream_read_bits(&bfs, 1, &forbidden_bit);
-  assert(forbidden_bit == 0);
+  bitfield_stream_read_bits(&bfs, 1, &nalu.forbidden_bit);
   bitfield_stream_read_bits(&bfs, 6, &nalu.nal_unit_type);
   bitfield_stream_read_bits(&bfs, 6, &nalu.nuh_layer_id);
   bitfield_stream_read_bits(&bfs, 3, &nalu.nuh_temporal_id_plus1);

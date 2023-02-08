@@ -33,6 +33,10 @@ bool init_bitstream_h264(void) {
   // Parse the first NALU to determine the type
   const H264Nalu nalu = parse_h264_nalu(file_buf + curr_pos,
                                         file_buf + filesize);
+
+  if (nalu.forbidden_bit != 0)
+    return false;
+
   // TODO: Make a better "is H.264" test. All tast test vectors start with one
   // of the following NALU types: SPS, AUD
   if (nalu.nal_unit_type != kSPS && nalu.nal_unit_type != kAUD)
@@ -115,6 +119,8 @@ size_t fill_compressed_buffer_h264(uint8_t* dest, size_t max_len) {
     // Parse the next NALU
     const H264Nalu nalu = parse_h264_nalu(
         file_buf + curr_pos + num_bytes_filled, file_buf + filesize);
+
+    assert(nalu.forbidden_bit == 0);
 
     // Frame boundaries can only be detected with slice headers.
     if (nalu.nal_unit_type == kNonIDRSlice || nalu.nal_unit_type == kIDRSlice) {

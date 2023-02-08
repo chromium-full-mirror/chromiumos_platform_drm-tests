@@ -123,6 +123,7 @@ typedef struct H264Nalu {
   const uint8_t* data;
   size_t size;
 
+  uint8_t forbidden_bit;
   int nal_ref_idc;
   int nal_unit_type;
 } H264Nalu;

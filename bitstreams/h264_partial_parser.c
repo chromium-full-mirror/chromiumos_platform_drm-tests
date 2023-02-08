@@ -257,9 +257,12 @@ H264Nalu parse_h264_nalu(uint8_t* curr_pos, uint8_t* end_pos) {
   BitfieldStream bfs = bitfield_stream_init(nalu.data + NALU_SIGNATURE_SIZE,
                                             nalu.data + nalu.size);
 
-  bitfield_stream_skip_bits(&bfs, 1);
+  bitfield_stream_read_bits(&bfs, 1, &nalu.forbidden_bit);
   bitfield_stream_read_bits(&bfs, 2, &nalu.nal_ref_idc);
   bitfield_stream_read_bits(&bfs, 5, &nalu.nal_unit_type);
+
+  if (nalu.forbidden_bit != 0)
+    return nalu;
 
   switch (nalu.nal_unit_type) {
     case kSPS:

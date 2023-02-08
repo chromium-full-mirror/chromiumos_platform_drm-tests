@@ -29,6 +29,10 @@ bool init_bitstream_h265(void) {
   // Parse the first NALU to determine the type
   const H265Nalu nalu = parse_h265_nalu(file_buf + curr_pos,
                                         file_buf + filesize);
+
+  if (nalu.forbidden_bit != 0)
+    return false;
+
   // TODO: Make a better "is H.265" test. All tast test vectors start with one
   // of the following NALU types: VPS_NUT, AUD_NUT.
   if (nalu.nal_unit_type != kVpsNut && nalu.nal_unit_type != kAudNut)
@@ -58,6 +62,8 @@ size_t fill_compressed_buffer_h265(uint8_t* dest, size_t max_len) {
     // Parse the next NALU
     const H265Nalu nalu = parse_h265_nalu(
         file_buf + curr_pos + num_bytes_filled, file_buf + filesize);
+
+    assert(nalu.forbidden_bit == 0);
 
     // Frame boundaries can only be detected with slice headers.
     if (is_h265_nalu_slice_type(nalu.nal_unit_type)) {
