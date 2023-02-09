@@ -22,6 +22,7 @@ struct h264_private {
 };
 
 static const uint32_t kH264Fourcc = v4l2_fourcc('H', '2', '6', '4');
+static const int kMaxNALUSearch = 32;
 
 bool init_bitstream_h264(struct bitstream* bts) {
   // Sometimes H.264 NALU streams are padded with a leading byte, sometimes
@@ -31,16 +32,31 @@ bool init_bitstream_h264(struct bitstream* bts) {
     return false;
 
   bts->curr_pos = first_nalu;
+  uint8_t* search_pos = first_nalu;
 
-  // Parse the first NALU to determine the type
-  const H264Nalu nalu = parse_h264_nalu(bts->curr_pos, bts->eof);
+  // The best indicator that this is a h.264 bitstream is a SPS nalu.
+  // Searching the entire bitstream is not necessary.  If none of the first
+  // |kMaxNALUSearch| nalus are not a SPS, give up.
+  int cnt;
+  for (cnt = 0; cnt < kMaxNALUSearch; ++cnt) {
+    // Parse the next NALU
+    const H264Nalu nalu = parse_h264_nalu_header(search_pos, bts->eof);
 
-  if (nalu.forbidden_bit != 0)
-    return false;
+    // There is the possibility that a bitstream may not be valid and the
+    // parser accidentally thinks the nalu is valid. In that case the
+    // forbidden bit should be set.
+    if (nalu.forbidden_bit != 0)
+      return false;
 
-  // TODO: Make a better "is H.264" test. All tast test vectors start with one
-  // of the following NALU types: SPS, AUD
-  if (nalu.nal_unit_type != kSPS && nalu.nal_unit_type != kAUD)
+    search_pos += nalu.size;
+    if (search_pos >= bts->eof)
+      return false;
+
+    if (nalu.nal_unit_type == kSPS)
+      break;
+  }
+
+  if (cnt == kMaxNALUSearch)
     return false;
 
   bts->fourcc = kH264Fourcc;

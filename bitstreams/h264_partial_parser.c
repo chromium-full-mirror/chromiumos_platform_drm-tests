@@ -248,7 +248,8 @@ static void parse_slice_header(BitfieldStream* bfs, H264Nalu* nalu) {
   }
 }
 
-H264Nalu parse_h264_nalu(uint8_t* curr_pos, uint8_t* end_pos) {
+
+H264Nalu parse_h264_nalu_header(uint8_t* curr_pos, uint8_t* end_pos) {
   const Nalu base_nalu = tokenize_nalu(curr_pos, end_pos);
 
   H264Nalu nalu = {.data=base_nalu.data,
@@ -260,6 +261,17 @@ H264Nalu parse_h264_nalu(uint8_t* curr_pos, uint8_t* end_pos) {
   bitfield_stream_read_bits(&bfs, 1, &nalu.forbidden_bit);
   bitfield_stream_read_bits(&bfs, 2, &nalu.nal_ref_idc);
   bitfield_stream_read_bits(&bfs, 5, &nalu.nal_unit_type);
+
+  return nalu;
+}
+
+H264Nalu parse_h264_nalu(uint8_t* curr_pos, uint8_t* end_pos) {
+  H264Nalu nalu = parse_h264_nalu_header(curr_pos, end_pos);
+
+  // Skip the bits that were already parsed as part of the header parsing
+  BitfieldStream bfs = bitfield_stream_init(nalu.data + NALU_SIGNATURE_SIZE,
+                                            nalu.data + nalu.size);
+  bitfield_stream_skip_bits(&bfs, 8);
 
   if (nalu.forbidden_bit != 0)
     return nalu;
