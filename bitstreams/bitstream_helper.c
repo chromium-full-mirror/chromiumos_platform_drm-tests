@@ -14,71 +14,68 @@
 #include "bitstreams/bitstream_helper_ivf.h"
 #include "v4l2_macros.h"
 
-uint8_t* file_buf = NULL;
-uint64_t filesize = 0;
-FILE* fd = NULL;
-uint64_t curr_pos = 0;
+size_t (*fill_compressed_buffer)(uint8_t* dest,
+                                 size_t max_len,
+                                 struct bitstream* bts) = NULL;
 
-uint32_t (*get_fourcc)(void) = NULL;
+bool init_bitstream(const char* filename, struct bitstream* bts) {
+  bts->fd = fopen(filename, "rb");
 
-bool (*is_end_of_stream)(void) = NULL;
-
-size_t (*fill_compressed_buffer)(uint8_t* dest, size_t max_len) = NULL;
-
-bool init_bitstream(char* filename) {
-  fd = fopen(filename, "rb");
-
-  if (!fd) {
+  if (!bts->fd) {
     LOG_ERROR("Unable to open file %s", filename);
-    cleanup_bitstream();
+    cleanup_bitstream(bts);
     return false;
   }
 
-  fseek(fd, 0, SEEK_END);
-  filesize = ftell(fd);
+  fseek(bts->fd, 0, SEEK_END);
+  bts->filesize = ftell(bts->fd);
 
-  file_buf =
-      (uint8_t*)mmap(NULL, filesize, PROT_READ, MAP_SHARED, fileno(fd), 0);
+  bts->file_buf =
+      (uint8_t*)mmap(NULL, bts->filesize, PROT_READ, MAP_SHARED,
+                     fileno(bts->fd), 0);
 
-  if (init_bitstream_h264()) {
+  bts->eof = bts->file_buf + bts->filesize;
+
+  if (init_bitstream_h264(bts)) {
     LOG_INFO("Initializing H264 bitstream");
-
-    get_fourcc = get_fourcc_h264;
-    is_end_of_stream = is_end_of_stream_h264;
     fill_compressed_buffer = fill_compressed_buffer_h264;
 
     return true;
-  } else if (init_bitstream_h265()) {
+  } else if (init_bitstream_h265(bts)) {
     LOG_INFO("Initializing H265 bitstream");
-
-    get_fourcc = get_fourcc_h265;
-    is_end_of_stream = is_end_of_stream_h265;
     fill_compressed_buffer = fill_compressed_buffer_h265;
 
     return true;
-  } else if (init_bitstream_ivf()) {
+  } else if (init_bitstream_ivf(bts)) {
     LOG_INFO("Initializing VP8/VP9 bitstream");
-    get_fourcc = get_fourcc_ivf;
-    is_end_of_stream = is_end_of_stream_ivf;
     fill_compressed_buffer = fill_compressed_buffer_ivf;
 
     return true;
   }
 
   LOG_ERROR("Error: Bitstream is of unknown format or malformed.");
-  cleanup_bitstream();
+  cleanup_bitstream(bts);
   return false;
 }
 
-void cleanup_bitstream(void) {
-  if (file_buf) {
-    munmap(file_buf, filesize);
-    file_buf = NULL;
-    filesize = 0;
+void cleanup_bitstream(struct bitstream* bts) {
+  if (bts->file_buf) {
+    munmap(bts->file_buf, bts->filesize);
+    bts->file_buf = NULL;
+    bts->filesize = 0;
   }
 
-  if (fd) {
-    fclose(fd);
-    fd = NULL;
+  if (bts->fd) {
+    fclose(bts->fd);
+    bts->fd = NULL;
   }
+
+  if (bts->private) {
+    free(bts->private);
+    bts->private = NULL;
+  }
+}
+
+bool is_end_of_stream(struct bitstream* bts) {
+  return bts->curr_pos >= bts->eof;
 }

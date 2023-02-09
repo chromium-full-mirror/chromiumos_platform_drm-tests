@@ -11,12 +11,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-bool init_bitstream_ivf(void);
+#include "bitstream_helper.h"
 
-uint32_t get_fourcc_ivf(void);
+bool init_bitstream_ivf(struct bitstream* bts);
 
-bool is_end_of_stream_ivf(void);
-
-size_t fill_compressed_buffer_ivf(uint8_t* dest, size_t max_len);
+size_t fill_compressed_buffer_ivf(uint8_t* dest,
+                                 size_t max_len,
+                                 struct bitstream* bts);
 
 #endif  // BITSTREAM_HELPER_IVF_H

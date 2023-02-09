@@ -15,8 +15,6 @@
 
 static const uint32_t kIVFHeaderSignature = v4l2_fourcc('D', 'K', 'I', 'F');
 
-int i = 0;
-
 struct ivf_file_header {
   uint32_t signature;
   uint16_t version;
@@ -37,8 +35,8 @@ struct ivf_frame_header {
 
 struct ivf_file_header file_header;
 
-bool init_bitstream_ivf(void) {
-  file_header = *((struct ivf_file_header*)file_buf);
+bool init_bitstream_ivf(struct bitstream* bts) {
+  file_header = *((struct ivf_file_header*)(bts->file_buf));
 
   if (file_header.signature != kIVFHeaderSignature) {
     LOG_ERROR("Incorrect header signature: 0x%x != 0x%x", file_header.signature,
@@ -53,33 +51,31 @@ bool init_bitstream_ivf(void) {
   LOG_INFO("Initial image dimensions: Width: %d, Height: %d", file_header.width,
            file_header.height);
 
-  curr_pos += sizeof(struct ivf_file_header);
+  bts->curr_pos = bts->file_buf + sizeof(struct ivf_file_header);
+
+  bts->private = NULL;
+  bts->fourcc = file_header.fourcc;
+
   return true;
 }
 
-uint32_t get_fourcc_ivf(void) {
-  return file_header.fourcc;
-}
-
-bool is_end_of_stream_ivf(void) {
-  return curr_pos >= filesize;
-}
-
-size_t fill_compressed_buffer_ivf(uint8_t* dest, size_t max_len) {
+size_t fill_compressed_buffer_ivf(uint8_t* dest,
+                                 size_t max_len,
+                                 struct bitstream* bts) {
   assert(dest);
-  if (sizeof(struct ivf_frame_header) > filesize - curr_pos) {
-    curr_pos = filesize;
+  if (bts->curr_pos + sizeof(struct ivf_frame_header) > bts->eof) {
+    bts->curr_pos = bts->eof;
     return 0;
   }
 
   struct ivf_frame_header frame_header =
-      *(struct ivf_frame_header*)(file_buf + curr_pos);
+      *(struct ivf_frame_header*)(bts->curr_pos);
   uint32_t num_bytes_filled = frame_header.size;
   assert(num_bytes_filled < max_len);
-  curr_pos += sizeof(struct ivf_frame_header);
-  if (num_bytes_filled + curr_pos > filesize)
-    num_bytes_filled = filesize - curr_pos;
-  memcpy(dest, file_buf + curr_pos, num_bytes_filled);
-  curr_pos += num_bytes_filled;
+  bts->curr_pos += sizeof(struct ivf_frame_header);
+  if (bts->curr_pos + num_bytes_filled > bts->eof)
+    num_bytes_filled = bts->eof - bts->curr_pos;
+  memcpy(dest, bts->curr_pos, num_bytes_filled);
+  bts->curr_pos += num_bytes_filled;
   return num_bytes_filled;
 }

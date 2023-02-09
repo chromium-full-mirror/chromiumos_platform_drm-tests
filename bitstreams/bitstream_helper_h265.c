@@ -16,19 +16,18 @@
 
 static const uint32_t kH265Fourcc = v4l2_fourcc('H', 'E', 'V', 'C');
 
-bool init_bitstream_h265(void) {
+bool init_bitstream_h265(struct bitstream* bts) {
   // Sometimes H.265 NALU streams are padded with a leading zero, sometimes
   // they are not.
-  assert(filesize > 5);
-  uint8_t* first_nalu = find_next_nalu(file_buf, file_buf + 3);
+  assert(bts->filesize > 5);
+  uint8_t* first_nalu = find_next_nalu(bts->file_buf, bts->file_buf + 3);
   if (NULL == first_nalu)
     return false;
 
-  curr_pos = first_nalu - file_buf;
+  bts->curr_pos = first_nalu;
 
   // Parse the first NALU to determine the type
-  const H265Nalu nalu = parse_h265_nalu(file_buf + curr_pos,
-                                        file_buf + filesize);
+  const H265Nalu nalu = parse_h265_nalu(bts->curr_pos, bts->eof);
 
   if (nalu.forbidden_bit != 0)
     return false;
@@ -38,30 +37,27 @@ bool init_bitstream_h265(void) {
   if (nalu.nal_unit_type != kVpsNut && nalu.nal_unit_type != kAudNut)
     return false;
 
+  bts->private = NULL;
+  bts->fourcc = kH265Fourcc;
+
   return true;
-}
-
-uint32_t get_fourcc_h265(void) {
-  return kH265Fourcc;
-}
-
-bool is_end_of_stream_h265(void) {
-  return curr_pos >= filesize;
 }
 
 // V4L2 drivers expect all NALUs associated with a given frame to appear in the
 // same buffer. This function helps group NALUs together into a frame by parsing
 // them individually and then checking for new pictures.
-size_t fill_compressed_buffer_h265(uint8_t* dest, size_t max_len) {
+size_t fill_compressed_buffer_h265(uint8_t* dest,
+                                  size_t max_len,
+                                  struct bitstream* bts) {
   assert(dest);
 
   size_t num_bytes_filled = 0;
   bool found_first_slice = false;
 
-  while (curr_pos + num_bytes_filled < filesize) {
+  while (bts->curr_pos + num_bytes_filled < bts->eof) {
     // Parse the next NALU
     const H265Nalu nalu = parse_h265_nalu(
-        file_buf + curr_pos + num_bytes_filled, file_buf + filesize);
+        bts->curr_pos + num_bytes_filled, bts->eof);
 
     assert(nalu.forbidden_bit == 0);
 
@@ -79,8 +75,8 @@ size_t fill_compressed_buffer_h265(uint8_t* dest, size_t max_len) {
   // Fill the buffer with all data we've parsed
   assert(num_bytes_filled < max_len);
   if (num_bytes_filled) {
-    memcpy(dest, file_buf + curr_pos, num_bytes_filled);
+    memcpy(dest, bts->curr_pos, num_bytes_filled);
   }
-  curr_pos += num_bytes_filled;
+  bts->curr_pos += num_bytes_filled;
   return num_bytes_filled;
 }

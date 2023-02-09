@@ -92,6 +92,7 @@ struct queue {
   // The OUTPUT queue should stop streaming when there are no remaining
   // compressed frames to enqueue to it.
   bool is_streaming;
+  struct bitstream* bts;
 };
 
 struct md5_hash {
@@ -615,8 +616,9 @@ int setup_OUTPUT(struct queue* OUTPUT_queue,
 // |OUTPUT_queue|.
 int submit_compressed_data(struct queue* OUTPUT_queue, uint32_t queue_index) {
   struct mmap_buffers* buffers = OUTPUT_queue->buffers;
-  const size_t buf_size = fill_compressed_buffer(
-      buffers[queue_index].start[0], buffers[queue_index].length[0]);
+  const size_t buf_size = fill_compressed_buffer(buffers[queue_index].start[0],
+                                                 buffers[queue_index].length[0],
+                                                 OUTPUT_queue->bts);
 
   if (!buf_size)
     return 0;
@@ -647,7 +649,7 @@ int prime_OUTPUT(struct queue* OUTPUT_queue) {
 
   for (uint32_t i = 0; i < OUTPUT_queue->cnt; ++i) {
     ret = submit_compressed_data(OUTPUT_queue, i);
-    if (ret || is_end_of_stream())
+    if (ret || is_end_of_stream(OUTPUT_queue->bts))
       break;
   }
   return ret;
@@ -1194,7 +1196,7 @@ int decode(struct gbm_device* gbm,
         // buffers in the output queue, then dequeue a buffer with
         // V4L2_BUF_FLAG_LAST set. After that happens, the decode loop will
         // stop.
-        if (!ret && is_end_of_stream())
+        if (!ret && is_end_of_stream(OUTPUT_queue->bts))
           ret = initiate_drain(OUTPUT_queue);
       }
     }
@@ -1374,7 +1376,8 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  init_bitstream(file_name);
+  struct bitstream bts;
+  init_bitstream(file_name, &bts);
 
   if (FILE_MULTIPLE == file_output.type) {
     const size_t len_prefix = strrchr(file_name, '.') - file_name;
@@ -1386,17 +1389,18 @@ int main(int argc, char* argv[]) {
     LOG_FATAL("Unable to open device file: %s.", kDecodeDevice);
   query_driver(v4lfd);
 
-  if (!capabilities(v4lfd, kDecodeDevice, get_fourcc(), &uncompressed_fourcc))
+  if (!capabilities(v4lfd, kDecodeDevice, bts.fourcc, &uncompressed_fourcc))
     LOG_FATAL("Not enough capabilities present for decoding.");
   assert(uncompressed_fourcc != V4L2_PIX_FMT_INVALID);
 
   struct queue OUTPUT_queue = {.v4lfd = v4lfd,
                                .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-                               .fourcc = get_fourcc(),
+                               .fourcc = bts.fourcc,
                                .num_planes = 1,
                                .memory = V4L2_MEMORY_MMAP,
                                .displayed_frames = 0,
-                               .is_streaming = false};
+                               .is_streaming = false,
+                               .bts = &bts};
   int ret = setup_OUTPUT(&OUTPUT_queue, /*optional_width=*/NULL,
        /*optional_height=*/NULL);
 
@@ -1433,7 +1437,7 @@ int main(int argc, char* argv[]) {
   if (use_gbm)
     close(drm_device_fd);
   free(file_name);
-  cleanup_bitstream();
+  cleanup_bitstream(&bts);
 
   // Closes checksum log file if specified
   if (md5_hash_logs.output_file_enabled)

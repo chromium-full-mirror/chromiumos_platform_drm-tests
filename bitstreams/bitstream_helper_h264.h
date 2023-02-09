@@ -11,12 +11,12 @@
 #include <stddef.h>
 #include <stdint.h>
 
-bool init_bitstream_h264(void);
+#include "bitstream_helper.h"
 
-uint32_t get_fourcc_h264(void);
+bool init_bitstream_h264(struct bitstream* bitstream);
 
-bool is_end_of_stream_h264(void);
-
-size_t fill_compressed_buffer_h264(uint8_t* dest, size_t max_len);
+size_t fill_compressed_buffer_h264(uint8_t* dest,
+                                   size_t max_len,
+                                   struct bitstream* bts);
 
 #endif  // BITSTREAM_HELPER_H264_H
