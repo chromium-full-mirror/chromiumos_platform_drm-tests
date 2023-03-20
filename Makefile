@@ -37,6 +37,7 @@ all: \
 	CC_BINARY(dmabuf_test) \
 	CC_BINARY(v4l2_stateful_decoder) \
 	CC_BINARY(v4l2_stateful_encoder) \
+	CC_BINARY(yuv_to_rgb_test) \
 
 ifeq ($(USE_VULKAN),1)
 all: CC_BINARY(vk_glow)
@@ -106,3 +107,6 @@ endif
 
 CC_BINARY(mapped_access_perf_test): mapped_access_perf_test.o \
 	CC_STATIC_LIBRARY(libbsdrm.pic.a)
+
+CC_BINARY(yuv_to_rgb_test): yuv_to_rgb_test.o CC_STATIC_LIBRARY(libbsdrm.pic.a)
+CC_BINARY(yuv_to_rgb_test): LDLIBS += -lGLESv2
