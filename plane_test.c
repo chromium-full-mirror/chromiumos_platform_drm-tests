@@ -479,11 +479,13 @@ int main(int argc, char** argv) {
     return 1;
   }
 
+  // We need to use GBM_BO_USE_LINEAR here since we're going to map |bg_bo|
+  // next; this might prevent using some compression mechanisms.
   struct gbm_bo* bg_bo =
       gbm_bo_create(gbm, mode.hdisplay, mode.vdisplay, GBM_FORMAT_XRGB8888,
-                    GBM_BO_USE_SCANOUT | GBM_BO_USE_SW_WRITE_RARELY);
+        GBM_BO_USE_SCANOUT | GBM_BO_USE_SW_WRITE_RARELY | GBM_BO_USE_LINEAR);
   if (!bg_bo) {
-    bs_debug_error("failed to create background buffer ojbect");
+    bs_debug_error("failed to create background buffer object");
     return 1;
   }
 
@@ -558,8 +560,11 @@ int main(int argc, char** argv) {
 
     printf("Creating buffer %ux%u %s\n", tp->bo_w, tp->bo_h,
            bs_get_format_name(tp->format));
+    // We need to use GBM_BO_USE_LINEAR here since we're going to map |tp->bo|
+    // next; this might prevent using some compression mechanisms.
     tp->bo = gbm_bo_create(gbm, tp->bo_w, tp->bo_h,
-                           bs_get_pixel_format(tp->format), GBM_BO_USE_SCANOUT);
+                           bs_get_pixel_format(tp->format),
+                           GBM_BO_USE_SCANOUT | GBM_BO_USE_LINEAR);
     if (!tp->bo) {
       bs_debug_error("failed to create buffer object");
       return 1;
