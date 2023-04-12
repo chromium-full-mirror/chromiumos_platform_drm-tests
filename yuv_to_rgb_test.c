@@ -93,6 +93,94 @@ static uint8_t expected_rec601_full[] = {
 	156,  82, 132, 255,
 };
 
+static uint8_t expected_rec709_narrow[] = {
+	 43,  40,  23, 255,
+	 66,  64,  46, 255,
+	 90,  83, 112, 255,
+	113, 106, 135, 255,
+
+	 43,  40,  23, 255,
+	 66,  64,  46, 255,
+	 90,  83, 112, 255,
+	113, 106, 135, 255,
+
+	 97,  24,  23, 255,
+	120,  48,  46, 255,
+	144,  67, 112, 255,
+	167,  90, 135, 255,
+
+	 97,  24,  23, 255,
+	120,  48,  46, 255,
+	144,  67, 112, 255,
+	167,  90, 135, 255,
+};
+
+static uint8_t expected_rec709_full[] = {
+	 54,  50,  36, 255,
+	 74,  70,  56, 255,
+	 94,  86, 113, 255,
+	114, 106, 133, 255,
+
+	 54,  50,  36, 255,
+	 74,  70,  56, 255,
+	 94,  86, 113, 255,
+	114, 106, 133, 255,
+
+	101,  36,  36, 255,
+	121,  56,  56, 255,
+	141,  72, 113, 255,
+	161,  92, 133, 255,
+
+	101,  36,  36, 255,
+	121,  56,  56, 255,
+	141,  72, 113, 255,
+	161,  92, 133, 255,
+};
+
+static uint8_t expected_rec2020_narrow[] = {
+	 43,  40,  22, 255,
+	 66,  63,  46, 255,
+	 90,  83, 112, 255,
+	113, 106, 135, 255,
+
+	 43,  40,  22, 255,
+	 66,  63,  46, 255,
+	 90,  83, 112, 255,
+	113,  106, 135, 255,
+
+	 93,  20,  22, 255,
+	117,  44,  46, 255,
+	140,  63, 112, 255,
+	163,  86, 135, 255,
+
+	 93,  20,  22, 255,
+	117,  44,  46, 255,
+	140,  63, 112, 255,
+	163,  86, 135, 255,
+};
+
+static uint8_t expected_rec2020_full[] = {
+	 54,  50,  36, 255,
+	 74,  70,  56, 255,
+	 94,  87, 114, 255,
+	114, 107, 134, 255,
+
+	 54,  50,  36, 255,
+	 74,  70,  56, 255,
+	 94,  87, 114, 255,
+	114, 107, 134, 255,
+
+	 98,  33,  36, 255,
+	118,  53,  56, 255,
+	138,  69, 114, 255,
+	158,  89, 134, 255,
+
+	 98,  33,  36, 255,
+	118,  53,  56, 255,
+	138,  69, 114, 255,
+	158,  89, 134, 255,
+};
+
 struct yuv_sampling_options {
 	/* One of:
 	* - EGL_ITU_REC601_EXT.
@@ -112,7 +200,8 @@ struct yuv_sampling_options {
 
 static const EGLint yuv_color_space_list[] = {
 	EGL_ITU_REC601_EXT,
-	// TODO(b/276465550): Add other color spaces, e.g. EGL_ITU_REC(709|2020)_EXT.
+	EGL_ITU_REC709_EXT,
+	EGL_ITU_REC2020_EXT,
 };
 
 static const EGLint yuv_range_list[] = {
@@ -124,9 +213,10 @@ static const char *get_egl_attr_string(EGLint attr)
 {
 	switch (attr) {
 		STRINGIFY(EGL_ITU_REC601_EXT);
+		STRINGIFY(EGL_ITU_REC709_EXT);
+		STRINGIFY(EGL_ITU_REC2020_EXT);
 		STRINGIFY(EGL_YUV_FULL_RANGE_EXT);
 		STRINGIFY(EGL_YUV_NARROW_RANGE_EXT);
-		// TODO(b/276465550): Add other color spaces, e.g. EGL_ITU_REC(709|2020)_EXT.
 		default:
 			assert(false && "Unsupported EGL attribute.");
 			return "";
@@ -385,6 +475,15 @@ static GLubyte *get_expected_rgb_values(uint32_t width, uint32_t height,
 		rgb_values = expected_rec601_narrow;
 	} else if (yuv_color_space == EGL_ITU_REC601_EXT && yuv_range == EGL_YUV_FULL_RANGE_EXT) {
 		rgb_values = expected_rec601_full;
+	} else if (yuv_color_space == EGL_ITU_REC709_EXT && yuv_range == EGL_YUV_NARROW_RANGE_EXT) {
+		rgb_values = expected_rec709_narrow;
+	} else if (yuv_color_space == EGL_ITU_REC709_EXT && yuv_range == EGL_YUV_FULL_RANGE_EXT) {
+		rgb_values = expected_rec709_full;
+	} else if (yuv_color_space == EGL_ITU_REC2020_EXT &&
+		   yuv_range == EGL_YUV_NARROW_RANGE_EXT) {
+		rgb_values = expected_rec2020_narrow;
+	} else if (yuv_color_space == EGL_ITU_REC2020_EXT && yuv_range == EGL_YUV_FULL_RANGE_EXT) {
+		rgb_values = expected_rec2020_full;
 	};
 
 	return rgb_values;
