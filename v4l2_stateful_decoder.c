@@ -45,7 +45,8 @@ static const uint32_t kInvalidFrameRate = 0;
 static const int kMaxRetryCount = 1 << 24;
 
 static uint32_t kPreferredUncompressedFourCCs[] = {V4L2_PIX_FMT_NV12,
-                                                   V4L2_PIX_FMT_MT21C};
+                                                   V4L2_PIX_FMT_MT21C,
+                                                   V4L2_PIX_FMT_P010};
 
 static int log_run_level = DEFAULT_LOG_LEVEL;
 
@@ -155,10 +156,7 @@ bool is_fourcc_supported(int v4lfd, enum v4l2_buf_type type, uint32_t fourcc) {
 }
 
 // Verifies that |fd| supports |compressed_format| and, if specified,
-// |uncompressed_format|. If |uncompressed_format| is not specified, i.e. it's
-// equal to V4L2_PIX_FMT_INVALID, then kPreferredUncompressedFourCCs are tried
-// instead and the first supported one returned in |uncompressed_format|. If any
-// command fails, the function returns false.
+// |uncompressed_format|.
 bool capabilities(int fd,
                   const char* fd_name,
                   uint32_t compressed_format,
@@ -187,18 +185,8 @@ bool capabilities(int fd,
           fourcc_to_string(*uncompressed_format, fourcc_str), fd_name);
       return false;
     }
-  } else {
-    const size_t num_fourccs =
-        sizeof(kPreferredUncompressedFourCCs) / sizeof(uint32_t);
-    for (size_t i = 0; i < num_fourccs; ++i) {
-      if (is_fourcc_supported(fd, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-                              kPreferredUncompressedFourCCs[i]))  {
-        *uncompressed_format = kPreferredUncompressedFourCCs[i];
-        return true;
-      }
-    }
-    return false;
   }
+
   return true;
 }
 
@@ -738,10 +726,33 @@ int setup_CAPTURE(struct gbm_device* gbm,
     if (ret != 0)
       LOG_ERROR("CAPTURE queue: VIDIOC_G_FMT failed: %s.", strerror(errno));
 
-    // |CAPTURE_queue| might be configured for Q08C, in that case we simply
-    // ignore it; we'll force |CAPTURE_queue->fourcc| further below.
-    assert(CAPTURE_queue->fourcc == fmt.fmt.pix_mp.pixelformat ||
-           fmt.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_QC08C);
+    // By default the CAPTURE format is not known at initialization because
+    // it could be 8bit or 10bit and that won't be known until the file is
+    // parsed. The format provided by VIDIOC_G_FMT may not be a preferred
+    // format, in which case one should be choosen from the preferred list.
+    if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_INVALID) {
+      const size_t num_fourccs =
+          sizeof(kPreferredUncompressedFourCCs) / sizeof(uint32_t);
+      for (size_t i = 0; i < num_fourccs; ++i) {
+        if (fmt.fmt.pix_mp.pixelformat == kPreferredUncompressedFourCCs[i]) {
+          CAPTURE_queue->fourcc = fmt.fmt.pix_mp.pixelformat;
+          break;
+        }
+      }
+
+      // Returned format is not a preferred one, go an pick a preferred
+      if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_INVALID) {
+        for (size_t i = 0; i < num_fourccs; ++i) {
+          if (is_fourcc_supported(CAPTURE_queue->v4lfd,
+                                  V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                                  kPreferredUncompressedFourCCs[i]))  {
+            CAPTURE_queue->fourcc = kPreferredUncompressedFourCCs[i];
+            break;
+          }
+        }
+      }
+    }
+    assert(CAPTURE_queue->fourcc != V4L2_PIX_FMT_INVALID);
 
     // Oftentimes the driver will give us back the appropriately aligned sizes.
     // Pick them up here.
@@ -1391,7 +1402,6 @@ int main(int argc, char* argv[]) {
 
   if (!capabilities(v4lfd, kDecodeDevice, bts.fourcc, &uncompressed_fourcc))
     LOG_FATAL("Not enough capabilities present for decoding.");
-  assert(uncompressed_fourcc != V4L2_PIX_FMT_INVALID);
 
   struct queue OUTPUT_queue = {.v4lfd = v4lfd,
                                .type = V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
