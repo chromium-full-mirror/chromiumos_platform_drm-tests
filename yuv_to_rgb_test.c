@@ -432,13 +432,13 @@ static bool set_up_graphics(struct bs_egl_fb *fb, uint32_t width, uint32_t heigh
 
 	const GLchar *frag =
 	    "#version 300 es\n"
-	    "#extension GL_OES_EGL_image_external : require\n"
+	    "#extension GL_OES_EGL_image_external_essl3 : require\n"
 	    "precision mediump float;\n"
 	    "uniform samplerExternalOES texSampler;\n"
 	    "in vec2 texPos;\n"
 	    "out vec4 fragColor;\n"
 	    "void main() {\n"
-	    "  fragColor = texture2D(texSampler, texPos);\n"
+	    "  fragColor = texture(texSampler, texPos);\n"
 	    "}\n";
 
 	program = bs_gl_program_create_vert_frag_bind(vert, frag, NULL);
