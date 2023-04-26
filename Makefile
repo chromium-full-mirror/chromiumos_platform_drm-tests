@@ -93,6 +93,8 @@ v4l2_stateful_decoder.o: $(SRC)/v4l2_macros.h $(SRC)/logging.h
 CC_BINARY(v4l2_stateful_decoder): v4l2_stateful_decoder.o
 CC_BINARY(v4l2_stateful_decoder): CC_STATIC_LIBRARY(libbitstreams.pic.a)
 CC_BINARY(v4l2_stateful_decoder): CC_STATIC_LIBRARY(libbsdrm.pic.a)
+CC_BINARY(v4l2_stateful_decoder): $(SRC)/pixel_formats/mt21_converter.h
+CC_BINARY(v4l2_stateful_decoder): CC_STATIC_LIBRARY(libmt21.pic.a)
 CC_BINARY(v4l2_stateful_decoder): LDLIBS += $(DRM_LIBS)
 CC_BINARY(v4l2_stateful_decoder): LDLIBS += -lssl -lcrypto
 

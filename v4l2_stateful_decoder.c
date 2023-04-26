@@ -26,6 +26,7 @@
 
 #include "bitstreams/bitstream_helper.h"
 #include "bs_drm.h"
+#include "pixel_formats/mt21_converter.h"
 #include "v4l2_macros.h"
 
 #ifndef V4L2_PIX_FMT_QC08C
@@ -466,12 +467,13 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
   assert(CAPTURE_queue->memory == V4L2_MEMORY_DMABUF ||
          CAPTURE_queue->memory == V4L2_MEMORY_MMAP);
 
-  // Maps the frame buffer into |buffer_nv12| and get the buffer's stride and
+  // Maps the frame buffer into |y_buffer| and get the buffer's stride and
   // size metadata for cropping and deinterleaving the image.
   uint32_t buffer_bytes_per_line = 0;
   uint32_t buffer_height = 0;
   size_t buffer_size = 0;
-  uint8_t* buffer_nv12 = NULL;
+  uint8_t* y_buffer = NULL;
+  uint8_t* uv_buffer = NULL;
   int bo_fd = 0;
 
   if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
@@ -487,39 +489,55 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
     buffer_bytes_per_line = gbm_bo_get_stride_for_plane(bo, 0);
     buffer_height = gbm_bo_get_height(bo);
 
-    buffer_nv12 = mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
+    y_buffer = mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
+    if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
+      uv_buffer =
+          y_buffer + compute_mt21_min_y_size(CAPTURE_queue->coded_width,
+                                             CAPTURE_queue->coded_height);
+    }
   } else {
     assert(CAPTURE_queue->memory == V4L2_MEMORY_MMAP);
-    // TODO(nhebert) doesn't support multi-planar MMAP buffers
-    assert(CAPTURE_queue->num_planes == 1);
 
     buffer_bytes_per_line = CAPTURE_queue->bytes_per_line[0];
     buffer_height = CAPTURE_queue->coded_height;
 
     buffer_size = CAPTURE_queue->buffers[queue_index].length[0];
-    buffer_nv12 = CAPTURE_queue->buffers[queue_index].start[0];
+    y_buffer = CAPTURE_queue->buffers[queue_index].start[0];
+    if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
+      uv_buffer = CAPTURE_queue->buffers[queue_index].start[1];
+      buffer_size += CAPTURE_queue->buffers[queue_index].length[1];
+    }
   }
 
-  assert(buffer_bytes_per_line * buffer_height  * 3 / 2 <= buffer_size);
+  assert(buffer_bytes_per_line * buffer_height * 3 / 2 <= buffer_size);
 
   // Libvpx golden md5 hashes are calculated in I420 format.
   // Deinterleave |buffer_nv12| and apply the display area.
   struct data_buffer buffer_i420 = {};
 
-  if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12) {
+  if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
+    size_t y_buf_size = CAPTURE_queue->coded_width * buffer_height * 3 / 2;
+    uint8_t* nv12_buffer = (uint8_t*)malloc(y_buf_size * 3 / 2);
+    convert_mt21_to_nv12(
+        nv12_buffer, nv12_buffer + CAPTURE_queue->coded_width * buffer_height,
+        y_buffer, uv_buffer, CAPTURE_queue->coded_width,
+        CAPTURE_queue->coded_height,
+        CAPTURE_queue->buffers[queue_index].length[0],
+        CAPTURE_queue->buffers[queue_index].length[1]);
+    buffer_i420 =
+        nv12_to_i420(CAPTURE_queue->display_area, CAPTURE_queue->coded_width,
+                     buffer_height, nv12_buffer);
+    free(nv12_buffer);
+  } else if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12) {
     buffer_i420 = nv12_to_i420(CAPTURE_queue->display_area,
-                               buffer_bytes_per_line,
-                               buffer_height,
-                               buffer_nv12);
+                               buffer_bytes_per_line, buffer_height, y_buffer);
   } else {
     buffer_i420 = p010_to_i010(CAPTURE_queue->display_area,
-                               buffer_bytes_per_line,
-                               buffer_height,
-                               buffer_nv12);
+                               buffer_bytes_per_line, buffer_height, y_buffer);
   }
 
   if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
-    munmap(buffer_nv12, buffer_size);
+    munmap(y_buffer, buffer_size);
     close(bo_fd);
   }
 
@@ -819,6 +837,14 @@ int setup_CAPTURE(struct gbm_device* gbm,
     fmt.fmt.pix_mp.width = CAPTURE_queue->coded_width;
     fmt.fmt.pix_mp.height = CAPTURE_queue->coded_height;
 
+    if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
+      // Factor in header when allocating buffers.
+      fmt.fmt.pix_mp.plane_fmt[0].sizeimage = compute_mt21_min_y_size(
+          CAPTURE_queue->coded_width, CAPTURE_queue->coded_height);
+      fmt.fmt.pix_mp.plane_fmt[1].sizeimage = compute_mt21_min_uv_size(
+          CAPTURE_queue->coded_width, CAPTURE_queue->coded_height);
+    }
+
     ret = ioctl(CAPTURE_queue->v4lfd, VIDIOC_S_FMT, &fmt);
     if (ret != 0)
       LOG_ERROR("CAPTURE queue: VIDIOC_S_FMT failed: %s.", strerror(errno));
@@ -968,7 +994,8 @@ void write_frame_to_disk(const struct file_output* file_output,
       }
     }
   } else if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12 ||
-             CAPTURE_queue->fourcc == V4L2_PIX_FMT_P010) {
+             CAPTURE_queue->fourcc == V4L2_PIX_FMT_P010 ||
+             CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
     struct data_buffer buffer_i420 =
       map_buffers_and_convert_to_i420(CAPTURE_queue, queue_index);
 
