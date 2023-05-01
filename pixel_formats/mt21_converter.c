@@ -43,6 +43,8 @@
 #define MT21_Y_FOOTER_ALIGNMENT 4096
 #define MT21_UV_FOOTER_ALIGNMENT 2048
 
+#define ALIGN_UP(x, alignment) (((x) + (alignment)-1) & (~((alignment)-1)))
+
 // MT21 is arranged in 16 byte rows and is read right to left, top to bottom,
 // and high bit to low bit.
 struct mt21_bitstream {
@@ -60,6 +62,8 @@ int read_bit(struct mt21_bitstream* to_read) {
     return 0;
 
   byte_row = byte_idx / MT21_BLOCK_WIDTH;
+  // Index goes from right to left, so we need to subtract it from the block
+  // width to get the column index from the left.
   byte_col = MT21_BLOCK_WIDTH - 1 - (byte_idx % MT21_BLOCK_WIDTH);
   ret = (to_read->buf[byte_row * MT21_BLOCK_WIDTH + byte_col] >>
          (BITS_IN_BYTE - 1 - (to_read->bit_idx % BITS_IN_BYTE))) &
@@ -73,8 +77,7 @@ uint32_t read_n_bits(struct mt21_bitstream* to_read, int n) {
   uint32_t ret = 0;
 
   for (int i = 0; i < n; i++) {
-    ret <<= 1;
-    ret |= read_bit(to_read);
+    ret = (ret << 1) | read_bit(to_read);
   }
 
   return ret;
@@ -113,7 +116,7 @@ int read_error_value(struct mt21_bitstream* to_read, int k) {
 
   // Read the unary component.
   while (1) {
-    int curr_bit = read_bit(to_read);
+    const int curr_bit = read_bit(to_read);
     if (curr_bit) {
       num_ones++;
 
@@ -257,12 +260,9 @@ size_t decompress_subblock(uint8_t* dest,
                            size_t bit_offset,
                            int width,
                            int height) {
-  struct mt21_bitstream bitstream;
+  struct mt21_bitstream bitstream = {
+      .bit_idx = bit_offset, .buf = src, .len = len};
   int k;
-
-  bitstream.bit_idx = bit_offset;
-  bitstream.buf = src;
-  bitstream.len = len;
 
   // Read k value.
   k = read_n_bits(&bitstream, 3) + 1;
@@ -312,15 +312,17 @@ struct block_metadata get_block_metadata(const uint8_t* footer,
 
   // Footer metadata is packed in 2-bit pairs from LSB to MSB. This means we can
   // pack 4 subblocks, or 2 blocks into every byte of footer.
-  block_offset /= MT21_BLOCK_SIZE;
-  ret.subblock1_len = (footer[block_offset / MT21_SUBBLOCKS_IN_BLOCK] >>
-                       ((block_offset % MT21_SUBBLOCKS_IN_BLOCK) ? 4 : 0)) &
-                      0x3;
-  ret.subblock1_len = MT21_BLOCK_WIDTH * (ret.subblock1_len + 1);
-  ret.subblock2_len = (footer[block_offset / MT21_SUBBLOCKS_IN_BLOCK] >>
-                       ((block_offset % MT21_SUBBLOCKS_IN_BLOCK) ? 6 : 2)) &
-                      0x3;
-  ret.subblock2_len = MT21_BLOCK_WIDTH * (ret.subblock2_len + 1);
+  const size_t block_idx = block_offset / MT21_BLOCK_SIZE;
+  ret.subblock1_len =
+      MT21_BLOCK_WIDTH * (((footer[block_idx / MT21_SUBBLOCKS_IN_BLOCK] >>
+                            ((block_idx % MT21_SUBBLOCKS_IN_BLOCK) ? 4 : 0)) &
+                           0x3) +
+                          1);
+  ret.subblock2_len =
+      MT21_BLOCK_WIDTH * (((footer[block_idx / MT21_SUBBLOCKS_IN_BLOCK] >>
+                            ((block_idx % MT21_SUBBLOCKS_IN_BLOCK) ? 6 : 2)) &
+                           0x3) +
+                          1);
 
   return ret;
 }
@@ -421,10 +423,8 @@ void convert_mt21_to_mm21(uint8_t* dest_y,
                           size_t height,
                           size_t y_buf_len,
                           size_t uv_buf_len) {
-  const size_t aligned_width =
-      (width + MT21_TILE_WIDTH - 1) & (~(MT21_TILE_WIDTH - 1));
-  const size_t aligned_height =
-      (height + MT21_TILE_HEIGHT - 1) & (~(MT21_TILE_HEIGHT - 1));
+  const size_t aligned_width = ALIGN_UP(width, MT21_TILE_WIDTH);
+  const size_t aligned_height = ALIGN_UP(height, MT21_TILE_HEIGHT);
   const size_t y_size = aligned_width * aligned_height;
   const size_t uv_size = y_size / 2;
   const uint8_t* y_footer =
@@ -495,15 +495,16 @@ void convert_mt21_to_nv12(uint8_t* dest_y,
                           size_t uv_buf_len) {
   uint8_t* tmp_y;
   uint8_t* tmp_uv;
+  const int aligned_width = ALIGN_UP(width, MT21_TILE_WIDTH);
+  const int aligned_height = ALIGN_UP(height, MT21_TILE_HEIGHT);
 
-  width = (width + MT21_TILE_WIDTH - 1) & (~(MT21_TILE_WIDTH - 1));
-  height = (height + MT21_TILE_HEIGHT - 1) & (~(MT21_TILE_HEIGHT - 1));
-  tmp_y = (uint8_t*)malloc(width * height);
-  tmp_uv = (uint8_t*)malloc(width * height / 2);
+  tmp_y = (uint8_t*)malloc(aligned_width * aligned_height);
+  tmp_uv = (uint8_t*)malloc(aligned_width * aligned_height / 2);
 
-  convert_mt21_to_mm21(tmp_y, tmp_uv, src_y, src_uv, width, height, y_buf_len,
-                       uv_buf_len);
-  convert_mm21_to_nv12(dest_y, dest_uv, tmp_y, tmp_uv, width, height);
+  convert_mt21_to_mm21(tmp_y, tmp_uv, src_y, src_uv, aligned_width,
+                       aligned_height, y_buf_len, uv_buf_len);
+  convert_mm21_to_nv12(dest_y, dest_uv, tmp_y, tmp_uv, aligned_width,
+                       aligned_height);
 
   free(tmp_y);
   free(tmp_uv);

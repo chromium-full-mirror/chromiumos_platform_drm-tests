@@ -472,12 +472,15 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
   uint32_t buffer_bytes_per_line = 0;
   uint32_t buffer_height = 0;
   size_t buffer_size = 0;
-  uint8_t* y_buffer = NULL;
-  uint8_t* uv_buffer = NULL;
+  uint8_t* plane_0_buffer = NULL;
+  uint8_t* plane_1_buffer = NULL;
   int bo_fd = 0;
 
   if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
     struct gbm_bo* bo = CAPTURE_queue->buffers[queue_index].bo;
+
+    assert(CAPTURE_queue->fourcc != V4L2_PIX_FMT_MT21C);
+
     bo_fd = gbm_bo_get_fd(bo);
     assert(bo_fd > 0);
     buffer_size = lseek(bo_fd, 0, SEEK_END);
@@ -489,12 +492,7 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
     buffer_bytes_per_line = gbm_bo_get_stride_for_plane(bo, 0);
     buffer_height = gbm_bo_get_height(bo);
 
-    y_buffer = mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
-    if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
-      uv_buffer =
-          y_buffer + compute_mt21_min_y_size(CAPTURE_queue->coded_width,
-                                             CAPTURE_queue->coded_height);
-    }
+    plane_0_buffer = mmap(0, buffer_size, PROT_READ, MAP_SHARED, bo_fd, 0);
   } else {
     assert(CAPTURE_queue->memory == V4L2_MEMORY_MMAP);
 
@@ -502,9 +500,9 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
     buffer_height = CAPTURE_queue->coded_height;
 
     buffer_size = CAPTURE_queue->buffers[queue_index].length[0];
-    y_buffer = CAPTURE_queue->buffers[queue_index].start[0];
+    plane_0_buffer = CAPTURE_queue->buffers[queue_index].start[0];
     if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
-      uv_buffer = CAPTURE_queue->buffers[queue_index].start[1];
+      plane_1_buffer = CAPTURE_queue->buffers[queue_index].start[1];
       buffer_size += CAPTURE_queue->buffers[queue_index].length[1];
     }
   }
@@ -517,10 +515,10 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
 
   if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
     size_t y_buf_size = CAPTURE_queue->coded_width * buffer_height * 3 / 2;
-    uint8_t* nv12_buffer = (uint8_t*)malloc(y_buf_size * 3 / 2);
+    uint8_t* nv12_buffer = (uint8_t*)malloc(y_buf_size);
     convert_mt21_to_nv12(
         nv12_buffer, nv12_buffer + CAPTURE_queue->coded_width * buffer_height,
-        y_buffer, uv_buffer, CAPTURE_queue->coded_width,
+        plane_0_buffer, plane_1_buffer, CAPTURE_queue->coded_width,
         CAPTURE_queue->coded_height,
         CAPTURE_queue->buffers[queue_index].length[0],
         CAPTURE_queue->buffers[queue_index].length[1]);
@@ -529,15 +527,18 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
                      buffer_height, nv12_buffer);
     free(nv12_buffer);
   } else if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12) {
-    buffer_i420 = nv12_to_i420(CAPTURE_queue->display_area,
-                               buffer_bytes_per_line, buffer_height, y_buffer);
+    buffer_i420 =
+        nv12_to_i420(CAPTURE_queue->display_area, buffer_bytes_per_line,
+                     buffer_height, plane_0_buffer);
   } else {
-    buffer_i420 = p010_to_i010(CAPTURE_queue->display_area,
-                               buffer_bytes_per_line, buffer_height, y_buffer);
+    buffer_i420 =
+        p010_to_i010(CAPTURE_queue->display_area, buffer_bytes_per_line,
+                     buffer_height, plane_0_buffer);
   }
 
   if (CAPTURE_queue->memory == V4L2_MEMORY_DMABUF) {
-    munmap(y_buffer, buffer_size);
+    assert(plane_1_buffer == NULL);
+    munmap(plane_0_buffer, buffer_size);
     close(bo_fd);
   }
 
@@ -857,8 +858,10 @@ int setup_CAPTURE(struct gbm_device* gbm,
     // fathom device capabilities and to approach parameters acceptable for
     // both the application and driver.
     assert(fmt.fmt.pix_mp.pixelformat == CAPTURE_queue->fourcc);
-
     CAPTURE_queue->num_planes = fmt.fmt.pix_mp.num_planes;
+    if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
+      assert(CAPTURE_queue->num_planes == 2);
+    }
 
     for (int i = 0; i < CAPTURE_queue->num_planes; ++i) {
       CAPTURE_queue->bytes_per_line[i] =
