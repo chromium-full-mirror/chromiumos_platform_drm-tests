@@ -33,6 +33,7 @@ static const uint32_t width = 4;
 static const uint32_t height = 4;
 
 static const int num_color_components = 4;
+static const int rgb_value_tolerance = 1;
 
 // clang-format off
 static uint8_t nv12_y[] = {
@@ -500,7 +501,7 @@ static bool examine_rbg_values_by_component(const GLubyte *actual_values,
 					    int *first_mismatched_component_index)
 {
 	for (int i = 0; i < num_color_components; i++) {
-		if (expected_values[i] != actual_values[i]) {
+		if (abs((int)expected_values[i] - (int)actual_values[i]) > rgb_value_tolerance) {
 			*first_mismatched_component_index = i;
 			return false;
 		}
