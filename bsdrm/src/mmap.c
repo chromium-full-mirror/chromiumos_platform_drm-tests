@@ -93,8 +93,7 @@ static void *gem_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 	horizontal_subsampling = 1;
 	vertical_subsampling = 1;
 	if (plane > 0) {
-		switch (format)
-		{
+		switch (format) {
 			case GBM_FORMAT_NV12:
 			case GBM_FORMAT_NV21:
 			case GBM_FORMAT_YVU420:
@@ -114,7 +113,7 @@ static void *gem_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 	if (gbm_bo_get_plane_count(bo) > 1) {
 		// TODO(mcasas, b/185492766): Use mmap() here.
 		ptr = gbm_bo_map2(bo, /*x=*/0, /*y=*/0, w, h, GBM_BO_TRANSFER_READ_WRITE, stride,
-				 &info->map_data, plane);
+				  &info->map_data, plane);
 	} else {
 		assert(plane == 0);
 		ptr = gbm_bo_map(bo, /*x=*/0, /*y=*/0, w, h, GBM_BO_TRANSFER_READ_WRITE, stride,
@@ -222,8 +221,8 @@ void bs_mapper_destroy(struct bs_mapper *mapper)
 	free(mapper);
 }
 
-void *bs_mapper_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
-		    void **map_data, uint32_t *stride)
+void *bs_mapper_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane, void **map_data,
+		    uint32_t *stride)
 {
 	assert(mapper);
 	assert(bo);
