@@ -489,21 +489,19 @@ static GLubyte *get_expected_rgb_values(uint32_t width, uint32_t height,
 	return rgb_values;
 }
 
-static void print_rgb_values(const GLubyte *pixels, int num_color_components)
+static void print_rgba_values_as_errors(const GLubyte *pixels)
 {
-	for (int j = 0; j < num_color_components; j++) {
-		if (j == num_color_components - 1)
-			printf("%u\t\n", pixels[j]);
-		else
-			printf("%u\t", pixels[j]);
-	}
+	assert(num_color_components == 4);
+	bs_debug_error("%3hhu %3hhu %3hhu %3hhu", pixels[0], pixels[1], pixels[2], pixels[3]);
 }
 
 static bool examine_rbg_values_by_component(const GLubyte *actual_values,
-					    const GLubyte *expected_values)
+					    const GLubyte *expected_values,
+					    int *first_mismatched_component_index)
 {
 	for (int i = 0; i < num_color_components; i++) {
 		if (expected_values[i] != actual_values[i]) {
+			*first_mismatched_component_index = i;
 			return false;
 		}
 	}
@@ -519,20 +517,25 @@ static bool examine_rbg_values(uint32_t width, uint32_t height, GLubyte *expecte
 
 	for (int j = 0; j < height; j++) {
 		for (int i = 0; i < width; i++) {
+			const size_t pixel_offset = j * width + i;
 			const GLubyte *actual_values_by_component =
-			    &pixels[(j * width + i) * num_color_components];
+			    &pixels[pixel_offset * num_color_components];
 			const GLubyte *expected_values_by_component =
-			    &expected_values[(j * width + i) * num_color_components];
+			    &expected_values[pixel_offset * num_color_components];
+
+			int first_mismatched_component_index = 0;
 			if (examine_rbg_values_by_component(actual_values_by_component,
-							    expected_values_by_component)) {
+							    expected_values_by_component,
+							    &first_mismatched_component_index)) {
 				continue;
 			}
 
-			bs_debug_error("At (%i,%i)\t", i, j);
-			bs_debug_error("Expected: ");
-			print_rgb_values(expected_values_by_component, num_color_components);
-			bs_debug_error("Actual: ");
-			print_rgb_values(actual_values_by_component, num_color_components);
+			bs_debug_error("Mismatch at pixel (%i, %i), component %d", j, i,
+				       first_mismatched_component_index);
+			bs_debug_error("Expected RGBA: ");
+			print_rgba_values_as_errors(expected_values_by_component);
+			bs_debug_error("Actual RGBA:   ");
+			print_rgba_values_as_errors(actual_values_by_component);
 			return false;
 		}
 	}
