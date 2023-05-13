@@ -22,7 +22,7 @@
 
 struct bs_map_info {
 	size_t plane_index;
-	void *ptr;
+	void *map_ptr;
 	void *map_data;
 };
 
@@ -56,9 +56,8 @@ static void *dma_buf_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t pla
 	void *ptr = mmap(NULL, length, (PROT_READ | PROT_WRITE), MAP_SHARED, drm_prime_fd, 0);
 	if (ptr == MAP_FAILED) {
 		bs_debug_error("dma-buf mmap returned MAP_FAILED: %d", errno);
-		ptr = MAP_FAILED;
-	} else {
-		ptr += gbm_bo_get_offset(bo, plane);
+		close(drm_prime_fd);
+		return MAP_FAILED;
 	}
 
 	struct dma_buf_sync sync_start = { 0 };
@@ -69,11 +68,16 @@ static void *dma_buf_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t pla
 	*stride = gbm_bo_get_stride_for_plane(bo, plane);
 
 	close(drm_prime_fd);
-	return ptr;
+
+	info->plane_index = plane;
+	info->map_ptr = ptr;
+	return ptr + gbm_bo_get_offset(bo, plane);
 }
 
 static void dma_buf_unmap(struct gbm_bo *bo, struct bs_map_info *info)
 {
+	assert(info->map_ptr);
+	assert(!info->map_data);
 	int ret;
 	int drm_prime_fd = gbm_bo_get_fd_for_plane(bo, info->plane_index);
 	if (drm_prime_fd >= 0) {
@@ -94,10 +98,7 @@ static void dma_buf_unmap(struct gbm_bo *bo, struct bs_map_info *info)
 		if (gbm_bo_get_handle_for_plane(bo, p).u32 == handle)
 			length += gbm_bo_get_plane_size(bo, p);
 	}
-
-	void *addr = info->ptr;
-	addr -= gbm_bo_get_offset(bo, info->plane_index);
-	ret = munmap(addr, length);
+	ret = munmap(info->map_ptr, length);
 	if (ret)
 		bs_debug_error("dma-buf unmap failed.");
 }
@@ -135,6 +136,9 @@ static void *gem_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 
 static void gem_unmap(struct gbm_bo *bo, struct bs_map_info *info)
 {
+	assert(!info->plane_index);
+	assert(!info->map_ptr);
+	assert(info->map_data);
 	gbm_bo_unmap(bo, info->map_data);
 }
 
@@ -151,8 +155,6 @@ static void *dumb_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 		bs_debug_error("dumb_map gbm_bo_get_fd failed: %d", errno);
 		return MAP_FAILED;
 	}
-
-	uint32_t size = gbm_bo_get_plane_size(bo, plane);
 
 	uint32_t bo_handle;
 	int ret = drmPrimeFDToHandle(mapper->device_fd, prime_fd, &bo_handle);
@@ -176,20 +178,25 @@ static void *dumb_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 		return MAP_FAILED;
 	}
 
+	const uint32_t size = gbm_bo_get_plane_size(bo, 0);
 	void *ptr = mmap(NULL, size, (PROT_READ | PROT_WRITE), MAP_SHARED, mapper->device_fd,
 			 mmap_arg.offset);
 	if (ptr == MAP_FAILED) {
 		bs_debug_error("mmap returned MAP_FAILED: %d", errno);
 		return MAP_FAILED;
 	}
-	*stride = gbm_bo_get_stride_for_plane(bo, plane);
+	*stride = gbm_bo_get_stride_for_plane(bo, 0);
 
+	info->map_ptr = ptr;
 	return ptr;
 }
 
 static void dumb_unmap(struct gbm_bo *bo, struct bs_map_info *info)
 {
-	int ret = munmap(info->ptr, gbm_bo_get_plane_size(bo, info->plane_index));
+	assert(!info->plane_index);
+	assert(info->map_ptr);
+	assert(!info->map_data);
+	int ret = munmap(info->map_ptr, gbm_bo_get_plane_size(bo, 0));
 	if (ret)
 		bs_debug_error("dumb_unmap failed.");
 }
@@ -242,16 +249,17 @@ void *bs_mapper_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane, v
 	assert(bo);
 	assert(map_data);
 	struct bs_map_info *info = calloc(1, sizeof(struct bs_map_info));
-	info->plane_index = plane;
+	if (!info)
+		return MAP_FAILED;
+
 	void *ptr = mapper->map_plane_fn(mapper, bo, plane, info, stride);
 	if (ptr == MAP_FAILED) {
 		free(info);
 		return MAP_FAILED;
 	}
 
-	info->ptr = ptr;
 	*map_data = info;
-	return info->ptr;
+	return ptr;
 }
 
 void bs_mapper_unmap(struct bs_mapper *mapper, struct gbm_bo *bo, void *map_data)
