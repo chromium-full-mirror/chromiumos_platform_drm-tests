@@ -77,9 +77,16 @@ static void dma_buf_unmap(struct gbm_bo *bo, struct bs_map_info *info)
 	if (ret)
 		bs_debug_error("DMA_BUF_IOCTL_SYNC failed");
 
+	uint32_t handle = gbm_bo_get_handle_for_plane(bo, info->plane_index).u32;
+	size_t length = 0;
+	for (size_t p = 0; p <= info->plane_index; p++) {
+		if (gbm_bo_get_handle_for_plane(bo, p).u32 == handle)
+			length += gbm_bo_get_plane_size(bo, p);
+	}
+
 	void *addr = info->ptr;
 	addr -= gbm_bo_get_offset(bo, info->plane_index);
-	ret = munmap(addr, gbm_bo_get_plane_size(bo, info->plane_index));
+	ret = munmap(addr, length);
 	if (ret)
 		bs_debug_error("dma-buf unmap failed.");
 }
