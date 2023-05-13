@@ -142,17 +142,23 @@ static void *dumb_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 		      struct bs_map_info *info, uint32_t *stride)
 {
 	if (plane) {
-		bs_debug_error("dump map supports only single plane buffer.");
+		bs_debug_error("dumb_map supports only single plane buffer.");
 		return MAP_FAILED;
 	}
 
 	int prime_fd = gbm_bo_get_fd(bo);
+	if (prime_fd < 0) {
+		bs_debug_error("dumb_map gbm_bo_get_fd failed: %d", errno);
+		return MAP_FAILED;
+	}
+
 	uint32_t size = gbm_bo_get_plane_size(bo, plane);
 
 	uint32_t bo_handle;
 	int ret = drmPrimeFDToHandle(mapper->device_fd, prime_fd, &bo_handle);
+	close(prime_fd);
 	if (ret) {
-		bs_debug_error("dump map failed.");
+		bs_debug_error("dumb_map failed.");
 		return MAP_FAILED;
 	}
 
@@ -172,14 +178,12 @@ static void *dumb_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 
 	void *ptr = mmap(NULL, size, (PROT_READ | PROT_WRITE), MAP_SHARED, mapper->device_fd,
 			 mmap_arg.offset);
-
 	if (ptr == MAP_FAILED) {
 		bs_debug_error("mmap returned MAP_FAILED: %d", errno);
 		return MAP_FAILED;
 	}
 	*stride = gbm_bo_get_stride_for_plane(bo, plane);
 
-	close(prime_fd);
 	return ptr;
 }
 
@@ -187,7 +191,7 @@ static void dumb_unmap(struct gbm_bo *bo, struct bs_map_info *info)
 {
 	int ret = munmap(info->ptr, gbm_bo_get_plane_size(bo, info->plane_index));
 	if (ret)
-		bs_debug_error("dump unmap failed.");
+		bs_debug_error("dumb_unmap failed.");
 }
 
 struct bs_mapper *bs_mapper_dma_buf_new()
