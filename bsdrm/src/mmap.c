@@ -156,6 +156,13 @@ static void *dumb_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 		return MAP_FAILED;
 	}
 
+	const off_t size = lseek(prime_fd, /*offset=*/0, SEEK_END);
+	if (size < 0) {
+		bs_debug_error("lseek failed: %d", errno);
+		close(prime_fd);
+		return MAP_FAILED;
+	}
+
 	uint32_t bo_handle;
 	int ret = drmPrimeFDToHandle(mapper->device_fd, prime_fd, &bo_handle);
 	close(prime_fd);
@@ -178,7 +185,6 @@ static void *dumb_map(struct bs_mapper *mapper, struct gbm_bo *bo, size_t plane,
 		return MAP_FAILED;
 	}
 
-	const uint32_t size = gbm_bo_get_plane_size(bo, 0);
 	void *ptr = mmap(NULL, size, (PROT_READ | PROT_WRITE), MAP_SHARED, mapper->device_fd,
 			 mmap_arg.offset);
 	if (ptr == MAP_FAILED) {
