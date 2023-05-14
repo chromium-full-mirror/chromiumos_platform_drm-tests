@@ -140,9 +140,10 @@ static void draw(struct context *ctx)
 		for (int frame_index = 0; frame_index < NUM_FRAMES; frame_index += 2) {
 			struct framebuffer *fb = &ctx->fbs[fb_idx];
 			uint32_t bo_stride;
-			size_t bo_size = gbm_bo_get_plane_size(fb->bo, 0);
 			const uint32_t width = gbm_bo_get_width(fb->bo);
 			const uint32_t height = gbm_bo_get_height(fb->bo);
+			const uint32_t stride = gbm_bo_get_stride(fb->bo);
+			size_t bo_size = stride * height;
 			uint32_t *bo_ptr = NULL;
 			volatile uint32_t *ptr = NULL;
 			void *map_data;
@@ -155,6 +156,7 @@ static void draw(struct context *ctx)
 						if (bo_ptr == MAP_FAILED)
 							bs_debug_error("failed to mmap gbm bo");
 
+						assert(bo_ptr != MAP_FAILED && bo_stride == stride);
 						ptr = bo_ptr;
 						break;
 
@@ -171,20 +173,21 @@ static void draw(struct context *ctx)
 						for (ptr = bo_ptr;
 						     ptr < bo_ptr + (bo_size / sizeof(*bo_ptr));
 						     ptr++) {
-							int y = ((void *)ptr - (void *)bo_ptr) /
-								bo_stride;
+							int y =
+							    ((void *)ptr - (void *)bo_ptr) / stride;
 							int x = ((void *)ptr - (void *)bo_ptr -
-								 bo_stride * y) /
+								 stride * y) /
 								sizeof(*ptr);
 							x -= frame_index * (width / NUM_FRAMES);
 							y -= frame_index * (height / NUM_FRAMES);
 							*ptr = 0xff000000;
 							if (x * x + y * y <
-							    frame_index * frame_index)
+							    frame_index * frame_index) {
 								*ptr |= (frame_index % 0x100) << 8;
-							else
+							} else {
 								*ptr |= 0xff |
 									(sequence_index * 64 << 16);
+							}
 						}
 						break;
 
