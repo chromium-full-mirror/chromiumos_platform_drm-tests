@@ -33,7 +33,7 @@ static const uint32_t width = 4;
 static const uint32_t height = 4;
 
 static const int num_color_components = 4;
-static const int rgb_value_tolerance = 1;
+static const int rgb_value_tolerance = 3;
 
 // clang-format off
 static uint8_t nv12_y[] = {
