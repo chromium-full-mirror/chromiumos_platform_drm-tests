@@ -39,7 +39,7 @@
 
 static const char* kDecodeDevice = "/dev/video-dec0";
 static const int kInputbufferMaxSize = 4 * 1024 * 1024;
-static const int kRequestBufferCount = 8;
+static const int kRequestBufferCount = 9;
 static const uint32_t kInvalidFrameRate = 0;
 // |kMaxRetryCount = 2^24| takes around 20 seconds to exhaust all retries on
 // Trogdor when a decode stalls.
