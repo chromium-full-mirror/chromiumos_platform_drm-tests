@@ -27,6 +27,7 @@
 #include "bitstreams/bitstream_helper.h"
 #include "bs_drm.h"
 #include "pixel_formats/mt21_converter.h"
+#include "pixel_formats/q08c_converter.h"
 #include "v4l2_macros.h"
 
 #ifndef V4L2_PIX_FMT_QC08C
@@ -45,9 +46,9 @@ static const uint32_t kInvalidFrameRate = 0;
 // Trogdor when a decode stalls.
 static const int kMaxRetryCount = 1 << 24;
 
-static uint32_t kPreferredUncompressedFourCCs[] = {V4L2_PIX_FMT_NV12,
-                                                   V4L2_PIX_FMT_MT21C,
-                                                   V4L2_PIX_FMT_P010};
+static uint32_t kPreferredUncompressedFourCCs[] = {
+    V4L2_PIX_FMT_NV12, V4L2_PIX_FMT_QC08C, V4L2_PIX_FMT_MT21C,
+    V4L2_PIX_FMT_P010};
 
 static int log_run_level = DEFAULT_LOG_LEVEL;
 
@@ -514,8 +515,8 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
   struct data_buffer buffer_i420 = {};
 
   if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
-    size_t y_buf_size = CAPTURE_queue->coded_width * buffer_height * 3 / 2;
-    uint8_t* nv12_buffer = (uint8_t*)malloc(y_buf_size);
+    size_t tmp_buf_size = CAPTURE_queue->coded_width * buffer_height * 3 / 2;
+    uint8_t* nv12_buffer = (uint8_t*)malloc(tmp_buf_size);
     convert_mt21_to_nv12(
         nv12_buffer, nv12_buffer + CAPTURE_queue->coded_width * buffer_height,
         plane_0_buffer, plane_1_buffer, CAPTURE_queue->coded_width,
@@ -526,11 +527,22 @@ struct data_buffer map_buffers_and_convert_to_i420(struct queue* CAPTURE_queue,
         nv12_to_i420(CAPTURE_queue->display_area, CAPTURE_queue->coded_width,
                      buffer_height, nv12_buffer);
     free(nv12_buffer);
+  } else if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_QC08C) {
+    uint8_t* nv12_buffer = (uint8_t*)malloc(buffer_size);
+    convert_q08c_to_nv12(nv12_buffer,
+                         nv12_buffer + buffer_bytes_per_line * buffer_height,
+                         plane_0_buffer, CAPTURE_queue->coded_width,
+                         CAPTURE_queue->coded_height);
+    buffer_i420 =
+        nv12_to_i420(CAPTURE_queue->display_area, buffer_bytes_per_line,
+                     buffer_height, nv12_buffer);
+    free(nv12_buffer);
   } else if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12) {
     buffer_i420 =
         nv12_to_i420(CAPTURE_queue->display_area, buffer_bytes_per_line,
                      buffer_height, plane_0_buffer);
   } else {
+    assert(CAPTURE_queue->fourcc == V4L2_PIX_FMT_P010);
     buffer_i420 =
         p010_to_i010(CAPTURE_queue->display_area, buffer_bytes_per_line,
                      buffer_height, plane_0_buffer);
@@ -752,26 +764,22 @@ int setup_CAPTURE(struct gbm_device* gbm,
     if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_INVALID) {
       const size_t num_fourccs =
           sizeof(kPreferredUncompressedFourCCs) / sizeof(uint32_t);
-      for (size_t i = 0; i < num_fourccs; ++i) {
-        if (fmt.fmt.pix_mp.pixelformat == kPreferredUncompressedFourCCs[i]) {
-          CAPTURE_queue->fourcc = fmt.fmt.pix_mp.pixelformat;
-          break;
-        }
-      }
 
-      // Returned format is not a preferred one, go an pick a preferred
-      if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_INVALID) {
-        for (size_t i = 0; i < num_fourccs; ++i) {
-          if (is_fourcc_supported(CAPTURE_queue->v4lfd,
-                                  V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-                                  kPreferredUncompressedFourCCs[i]))  {
-            CAPTURE_queue->fourcc = kPreferredUncompressedFourCCs[i];
-            break;
-          }
+      // Pick from a list of supported formats in order of their preference.
+      for (size_t i = 0; i < num_fourccs; ++i) {
+        if (is_fourcc_supported(CAPTURE_queue->v4lfd,
+                                V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+                                kPreferredUncompressedFourCCs[i])) {
+          CAPTURE_queue->fourcc = kPreferredUncompressedFourCCs[i];
+          break;
         }
       }
     }
     assert(CAPTURE_queue->fourcc != V4L2_PIX_FMT_INVALID);
+    if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_QC08C) {
+      modifier = DRM_FORMAT_MOD_QCOM_COMPRESSED;
+      LOG_INFO("CAPTURE format is compressed, setting modifier.");
+    }
 
     // Oftentimes the driver will give us back the appropriately aligned sizes.
     // Pick them up here.
@@ -998,7 +1006,8 @@ void write_frame_to_disk(const struct file_output* file_output,
     }
   } else if (CAPTURE_queue->fourcc == V4L2_PIX_FMT_NV12 ||
              CAPTURE_queue->fourcc == V4L2_PIX_FMT_P010 ||
-             CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C) {
+             CAPTURE_queue->fourcc == V4L2_PIX_FMT_MT21C ||
+             CAPTURE_queue->fourcc == V4L2_PIX_FMT_QC08C) {
     struct data_buffer buffer_i420 =
       map_buffers_and_convert_to_i420(CAPTURE_queue, queue_index);
 
