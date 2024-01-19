@@ -53,7 +53,7 @@ struct mt21_bitstream {
   size_t len;
 };
 
-int read_bit(struct mt21_bitstream* to_read) {
+static int read_bit(struct mt21_bitstream* to_read) {
   size_t byte_idx = to_read->bit_idx / BITS_IN_BYTE;
   size_t byte_row, byte_col;
   int ret;
@@ -73,7 +73,7 @@ int read_bit(struct mt21_bitstream* to_read) {
   return ret;
 }
 
-uint32_t read_n_bits(struct mt21_bitstream* to_read, int n) {
+static uint32_t read_n_bits(struct mt21_bitstream* to_read, int n) {
   uint32_t ret = 0;
 
   for (int i = 0; i < n; i++) {
@@ -106,7 +106,7 @@ uint32_t read_n_bits(struct mt21_bitstream* to_read, int n) {
 //    big error value and we are afraid the unary component will explode.
 // 3. 0s lack an LSB. This is because we use the LSB as a sign bit, and it's
 //    unnecessary to have a negative and positive 0.
-int read_error_value(struct mt21_bitstream* to_read, int k) {
+static int read_error_value(struct mt21_bitstream* to_read, int k) {
   // This is part of the length limiting logic. When we see
   // |escape_sequence_num| number of 1s in a row, we interpret that as an
   // "escape sequence" and switch into binary mode.
@@ -170,7 +170,11 @@ int read_error_value(struct mt21_bitstream* to_read, int k) {
 // Note that we process pixels in a "mirrored" raster order, from right to left,
 // and top to bottom. This is why we set D to be the right neighbor, not the
 // left neighbor.
-uint8_t predict(const uint8_t* subblock, int x, int y, int width, int height) {
+static uint8_t predict(const uint8_t* subblock,
+                       int x,
+                       int y,
+                       int width,
+                       int height) {
   assert(!(x == width - 1 && y == 0));
 
   if (y == 0) {
@@ -254,12 +258,12 @@ uint8_t predict(const uint8_t* subblock, int x, int y, int width, int height) {
 // 4. 0 padding up to the nearest 16 byte boundary. Note that this won't be
 //    present if the compressed data happens to already line up to a 16 byte
 //    boundary.
-size_t decompress_subblock(uint8_t* dest,
-                           const uint8_t* src,
-                           size_t len,
-                           size_t bit_offset,
-                           int width,
-                           int height) {
+static size_t decompress_subblock(uint8_t* dest,
+                                  const uint8_t* src,
+                                  size_t len,
+                                  size_t bit_offset,
+                                  int width,
+                                  int height) {
   struct mt21_bitstream bitstream = {
       .bit_idx = bit_offset, .buf = src, .len = len};
   int k;
@@ -306,8 +310,8 @@ struct block_metadata {
   size_t subblock2_len;
 };
 
-struct block_metadata get_block_metadata(const uint8_t* footer,
-                                         size_t block_offset) {
+static struct block_metadata get_block_metadata(const uint8_t* footer,
+                                                size_t block_offset) {
   struct block_metadata ret;
 
   // Footer metadata is packed in 2-bit pairs from LSB to MSB. This means we can
@@ -327,10 +331,10 @@ struct block_metadata get_block_metadata(const uint8_t* footer,
   return ret;
 }
 
-void decompress_y_block(uint8_t* dest,
-                        const uint8_t* src,
-                        const uint8_t* footer,
-                        size_t block_offset) {
+static void decompress_y_block(uint8_t* dest,
+                               const uint8_t* src,
+                               const uint8_t* footer,
+                               size_t block_offset) {
   struct block_metadata metadata = get_block_metadata(footer, block_offset);
 
   if (metadata.subblock1_len == MT21_SUBBLOCK_SIZE) {
@@ -358,9 +362,9 @@ void decompress_y_block(uint8_t* dest,
 
 // U and V blocks are compressed separately, so we need to re-interleave them to
 // produce valid MM21.
-void interleave_uv_block(uint8_t* dest_uv,
-                         const uint8_t* src_u,
-                         const uint8_t* src_v) {
+static void interleave_uv_block(uint8_t* dest_uv,
+                                const uint8_t* src_u,
+                                const uint8_t* src_v) {
   for (int i = 0; i < MT21_SUBBLOCK_SIZE / 2; i++) {
     *dest_uv = *src_u;
     dest_uv++;
@@ -371,10 +375,10 @@ void interleave_uv_block(uint8_t* dest_uv,
   }
 }
 
-void decompress_uv_block(uint8_t* dest,
-                         const uint8_t* src,
-                         const uint8_t* footer,
-                         size_t block_offset) {
+static void decompress_uv_block(uint8_t* dest,
+                                const uint8_t* src,
+                                const uint8_t* footer,
+                                size_t block_offset) {
   uint8_t scratch_u[MT21_SUBBLOCK_SIZE / 2];
   uint8_t scratch_v[MT21_SUBBLOCK_SIZE / 2];
   struct block_metadata metadata = get_block_metadata(footer, block_offset);
@@ -408,21 +412,21 @@ void decompress_uv_block(uint8_t* dest,
   }
 }
 
-size_t compute_footer_offset(size_t plane_size,
-                             size_t buf_len,
-                             size_t alignment) {
+static size_t compute_footer_offset(size_t plane_size,
+                                    size_t buf_len,
+                                    size_t alignment) {
   size_t footer_size = plane_size / MT21_BLOCK_SIZE / 2;
   return ((buf_len - footer_size) & (~(alignment - 1)));
 }
 
-void convert_mt21_to_mm21(uint8_t* dest_y,
-                          uint8_t* dest_uv,
-                          const uint8_t* src_y,
-                          const uint8_t* src_uv,
-                          size_t width,
-                          size_t height,
-                          size_t y_buf_len,
-                          size_t uv_buf_len) {
+static void convert_mt21_to_mm21(uint8_t* dest_y,
+                                 uint8_t* dest_uv,
+                                 const uint8_t* src_y,
+                                 const uint8_t* src_uv,
+                                 size_t width,
+                                 size_t height,
+                                 size_t y_buf_len,
+                                 size_t uv_buf_len) {
   const size_t aligned_width = ALIGN_UP(width, MT21_TILE_WIDTH);
   const size_t aligned_height = ALIGN_UP(height, MT21_TILE_HEIGHT);
   const size_t y_size = aligned_width * aligned_height;
@@ -443,10 +447,10 @@ void convert_mt21_to_mm21(uint8_t* dest_y,
 }
 
 // Detiles an MM21 row into NV12. See also the implementation in LibYUV.
-void detile_mm21_row(const uint8_t* src,
-                     int src_tile_stride,
-                     uint8_t* dest,
-                     int width) {
+static void detile_mm21_row(const uint8_t* src,
+                            int src_tile_stride,
+                            uint8_t* dest,
+                            int width) {
   for (int x = 0; x < width - (MT21_TILE_WIDTH - 1); x += MT21_TILE_WIDTH) {
     memcpy(dest, src, MT21_TILE_WIDTH);
     dest += MT21_TILE_WIDTH;
@@ -459,12 +463,12 @@ void detile_mm21_row(const uint8_t* src,
 }
 
 // Convert MM21 to NV12.
-void convert_mm21_to_nv12(uint8_t* dest_y,
-                          uint8_t* dest_uv,
-                          const uint8_t* src_y,
-                          const uint8_t* src_uv,
-                          size_t width,
-                          size_t height) {
+static void convert_mm21_to_nv12(uint8_t* dest_y,
+                                 uint8_t* dest_uv,
+                                 const uint8_t* src_y,
+                                 const uint8_t* src_uv,
+                                 size_t width,
+                                 size_t height) {
   // Convert Y plane.
   for (int y = 0; y < height; y++) {
     detile_mm21_row(src_y, MT21_TILE_SIZE, dest_y, width);
