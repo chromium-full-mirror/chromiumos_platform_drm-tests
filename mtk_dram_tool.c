@@ -70,8 +70,9 @@
 
 #define MICROSECONDS_IN_MILLISECOND 1000
 
-static const char* total_bandwidth_compatible_devices[4] = {
-    "mediatek,mt8183", "mediatek,mt8186", "mediatek,mt8192", "mediatek,mt8195"};
+static const char* total_bandwidth_compatible_devices[5] = {
+    "mediatek,mt8183", "mediatek,mt8186", "mediatek,mt8192", "mediatek,mt8195",
+    "mediatek,mt8188"};
 static const char* granular_bandwidth_compatible_devices[1] = {
     "mediatek,mt8183"};
 
