@@ -885,6 +885,7 @@ static void print_help(const char* argv0) {
   printf("  -c, --codec       codec\n");
   printf("  -e, --end_usage   rate control mode: VBR (default), CBR\n");
   printf("  -q, --buffer_fmt  OUTPUT queue format\n");
+  printf("  -l, --hier        hierarchical p frame distance\n");
 }
 
 static const struct option longopts[] = {
@@ -900,6 +901,7 @@ static const struct option longopts[] = {
     {"codec", required_argument, NULL, 'c'},
     {"end_usage", required_argument, NULL, 'e'},
     {"buffer_fmt", required_argument, NULL, 'q'},
+    {"hier", required_argument, NULL, 'l'},
     {0, 0, 0, 0},
 };
 
@@ -938,10 +940,12 @@ int main(int argc, char* argv[]) {
     // We need to explicitly request SPSPPS otherwise libv4l doesn't add it.
     ENCODER_CTL(V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR, 1),
 #endif
+    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING, 0),
+    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER, 0),
     ENCODER_CTL(0, 0)
   };
 
-  while ((c = getopt_long(argc, argv, "f:i:o:w:h:m:r:b:g:c:e:q:", longopts,
+  while ((c = getopt_long(argc, argv, "f:i:o:w:h:m:r:b:g:c:e:q:l:", longopts,
                           NULL)) != -1) {
     switch (c) {
       case 'f':
@@ -1004,6 +1008,13 @@ int main(int argc, char* argv[]) {
           printf("using (%s) as the OUTPUT_queue buffer format\n", optarg);
         }
         break;
+      case 'l':
+        set_control_value(h264_control_list,
+                          V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING,
+                          1);
+        set_control_value(h264_control_list,
+                          V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER,
+                          atoi(optarg));
       default:
         break;
     }
