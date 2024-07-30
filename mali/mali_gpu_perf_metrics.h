@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The Chromium OS Authors. All rights reserved.
+ * Copyright 2022 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -35,12 +35,13 @@ typedef enum {
   gpu_model_tgox = 12,
   gpu_model_tdvx = 13,
   gpu_model_ttrx = 14,
-  gpu_model_tnax = 15
+  gpu_model_tnax = 15,
+  gpu_model_generic_csf = 16
 } MaliGpuModel;
 
 struct mali_counter_values {
   MaliGpuCounter counter;
-  uint32_t* values;
+  uint64_t* values;
   size_t num_values;
 };
 
@@ -53,10 +54,11 @@ MaliGpuModel get_model_from_product_id(int product_id);
 // TODO (greenjustin): Add a performance metrics context variable to keep state
 // rather than relying on global variables.
 void initialize_mali_perf_reader();
-void reset_perf_metrics();
-struct mali_counter_response read_perf_metrics(MaliGpuCounter* counters,
-                                               size_t num_counters);
 void free_counters(struct mali_counter_response counters);
-void cleanup_mali_perf_reader();
+
+extern void (*reset_perf_metrics)(void);
+extern struct mali_counter_response (*read_perf_metrics)(MaliGpuCounter*,
+                                                         size_t);
+extern void (*cleanup_mali_perf_reader)(void);
 
 #endif  // __MALI_GPU_PERF_METRICS_H__

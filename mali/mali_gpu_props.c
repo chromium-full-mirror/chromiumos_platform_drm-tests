@@ -1,5 +1,5 @@
 /*
- * Copyright 2022 The Chromium OS Authors. All rights reserved.
+ * Copyright 2022 The ChromiumOS Authors
  * Use of this source code is governed by a BSD-style license that can be
  * found in the LICENSE file.
  */
@@ -76,10 +76,18 @@ void get_gpu_property_buffer() {
   // querying GPU properties, the GPU properties IOCTL will fail unless we check
   // the version and set the flags.
   struct kbase_ioctl_version_check version_check;
-  if (ioctl(gpufd, KBASE_IOCTL_VERSION_CHECK, &version_check) < 0)
-    LOG_FATAL("Error checking GPU version! %s\n", strerror(errno));
-  assert(version_check.major >= SUPPORTED_MAJOR_VERSION);
-  assert(version_check.minor >= SUPPORTED_MINOR_VERSION);
+  if (ioctl(gpufd, KBASE_IOCTL_VERSION_CHECK, &version_check) < 0) {
+    if (errno != EPERM ||
+        ioctl(gpufd, KBASE_IOCTL_VERSION_CHECK_CSF, &version_check) < 0) {
+      LOG_FATAL("Error checking GPU version! %s\n", strerror(errno));
+    } else {
+      assert(version_check.major >= SUPPORTED_MAJOR_VERSION_CSF);
+      assert(version_check.minor >= SUPPORTED_MINOR_VERSION);
+    }
+  } else {
+    assert(version_check.major >= SUPPORTED_MAJOR_VERSION);
+    assert(version_check.minor >= SUPPORTED_MINOR_VERSION);
+  }
 
   struct kbase_ioctl_set_flags init_flags;
   init_flags.create_flags = BASE_CONTEXT_SYSTEM_MONITOR_SUBMIT_DISABLED;
