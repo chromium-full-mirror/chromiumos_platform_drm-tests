@@ -79,11 +79,11 @@ struct encoder_control {
   uint32_t id;
   uint32_t value;
   uint32_t enabled;
-  char *name;
+  char* name;
 };
 
 #define ENCODER_CTL(ID, VALUE) \
-  {.id = ID, .value = VALUE, .enabled = 1, .name = #ID}
+  { .id = ID, .value = VALUE, .enabled = 1, .name = #ID }
 
 struct ivf_file_header {
   uint32_t signature;
@@ -136,8 +136,8 @@ void enumerate_menu(int v4lfd, uint32_t id, uint32_t min, uint32_t max) {
 }
 
 int verify_capabilities(int v4lfd,
-                 uint32_t OUTPUT_format,
-                 uint32_t CAPTURE_format) {
+                        uint32_t OUTPUT_format,
+                        uint32_t CAPTURE_format) {
   struct v4l2_capability cap;
   memset(&cap, 0, sizeof(cap));
   int ret = do_ioctl(v4lfd, VIDIOC_QUERYCAP, &cap);
@@ -302,8 +302,8 @@ int submit_raw_frame_row_by_row(const uint8_t* frame_buffer,
     buffer =
         buffers[index].start[0] + queue->encoded_width * queue->encoded_height;
     const uint8_t* u_ptr = frame_buffer;
-    const uint8_t* v_ptr = frame_buffer +
-                                 ((queue->raw_width * queue->raw_height) / 4);
+    const uint8_t* v_ptr =
+        frame_buffer + ((queue->raw_width * queue->raw_height) / 4);
     for (int row = 0; row < queue->raw_height / 2; ++row) {
       for (int col = 0; col < chroma_raw_width; ++col) {
         buffer[col * 2] = u_ptr[col];
@@ -337,8 +337,7 @@ int submit_raw_frame(const struct file_buffer* fb,
     return -1;
   }
 
-  if (queue->raw_width == queue->encoded_width &&
-      queue->fourcc == fi->format &&
+  if (queue->raw_width == queue->encoded_width && queue->fourcc == fi->format &&
       queue->fourcc == v4l2_fourcc('N', 'V', '1', '2')) {
     return submit_raw_frame_in_bulk(fb->buffer, queue, index);
   }
@@ -571,8 +570,8 @@ void disable_unsupported_controls(int v4lfd,
     encoder_ctrl->enabled = (ret == 0);
 
     if (ret != 0) {
-      fprintf(stderr,
-        "%s control does not exist on this platform\n" , encoder_ctrl->name);
+      fprintf(stderr, "%s control does not exist on this platform\n",
+              encoder_ctrl->name);
     }
 
     encoder_ctrl++;
@@ -592,7 +591,7 @@ void set_control_value(struct encoder_control* encoder_ctrl,
                        uint32_t id,
                        uint32_t value) {
   for (; encoder_ctrl && encoder_ctrl->id != 0; ++encoder_ctrl) {
-    if (encoder_ctrl->id == id){
+    if (encoder_ctrl->id == id) {
       encoder_ctrl->value = value;
       break;
     }
@@ -608,7 +607,7 @@ int get_control_value(const struct encoder_control* encoder_ctrl, uint32_t id) {
   return -1;
 }
 
-const char *get_control_name(const struct encoder_control* encoder_ctrl,
+const char* get_control_name(const struct encoder_control* encoder_ctrl,
                              uint32_t id) {
   for (; encoder_ctrl && encoder_ctrl->id != 0; ++encoder_ctrl) {
     if (encoder_ctrl->id == id)
@@ -619,7 +618,7 @@ const char *get_control_name(const struct encoder_control* encoder_ctrl,
 }
 
 void fill_ext_controls(const struct encoder_control* encoder_ctrl,
-                       struct v4l2_ext_control *ext_ctrl) {
+                       struct v4l2_ext_control* ext_ctrl) {
   int enabled_i = 0;
   for (; encoder_ctrl && encoder_ctrl->id != 0; ++encoder_ctrl) {
     if (encoder_ctrl->enabled) {
@@ -656,15 +655,14 @@ int set_ext_controls(int v4lfd, const struct encoder_control* encoder_ctrl) {
   if (get_ret != 0)
     perror("VIDIOC_G_EXT_CTRLS failed");
 
-
   for (int i = 0; i < ctrl_cnt; ++i) {
     int ctrl_value = get_control_value(encoder_ctrl, ext_ctrl[i].id);
-    if (ext_ctrl[i].value != ctrl_value){
-      fprintf(stderr,
-        "control (%s) used a value of (%d) instead of the requested (%d)\n",
-        get_control_name(encoder_ctrl, ext_ctrl[i].id),
-        ext_ctrl[i].value,
-        ctrl_value);
+    if (ext_ctrl[i].value != ctrl_value) {
+      fprintf(
+          stderr,
+          "control (%s) used a value of (%d) instead of the requested (%d)\n",
+          get_control_name(encoder_ctrl, ext_ctrl[i].id), ext_ctrl[i].value,
+          ctrl_value);
     }
   }
 
@@ -703,9 +701,7 @@ int dequeue_buffer(struct queue* queue,
 }
 
 // 4.5.2.8. Drain
-void drain(struct queue* OUTPUT_queue,
-           struct queue* CAPTURE_queue) {
-
+void drain(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
   // 1. Begin the drain sequence by issuing VIDIOC_ENCODER_CMD().
   struct v4l2_encoder_cmd cmd;
   memset(&cmd, 0, sizeof(cmd));
@@ -918,32 +914,30 @@ int main(int argc, char* argv[]) {
   int c;
 
   struct encoder_control common_control_list[] = {
-    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_BITRATE, 1000),
-    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_GOP_SIZE, 20),
-    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE, 1),
-    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
-      V4L2_MPEG_VIDEO_BITRATE_MODE_VBR),
-    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, 1500),
-    ENCODER_CTL(0, 0)
-  };
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_BITRATE, 1000),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_GOP_SIZE, 20),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE, 1),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
+                  V4L2_MPEG_VIDEO_BITRATE_MODE_VBR),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, 1500),
+      ENCODER_CTL(0, 0)};
 
   struct encoder_control h264_control_list[] = {
-    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_PROFILE,
-      V4L2_MPEG_VIDEO_H264_PROFILE_MAIN),
-    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_LEVEL,
-      V4L2_MPEG_VIDEO_H264_LEVEL_4_0),
-    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE,
-      V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC),
-    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_HEADER_MODE,
-      V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_PROFILE,
+                  V4L2_MPEG_VIDEO_H264_PROFILE_MAIN),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_LEVEL,
+                  V4L2_MPEG_VIDEO_H264_LEVEL_4_0),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE,
+                  V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_HEADER_MODE,
+                  V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME),
 #if defined(USE_V4LPLUGIN)
-    // We need to explicitly request SPSPPS otherwise libv4l doesn't add it.
-    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR, 1),
+      // We need to explicitly request SPSPPS otherwise libv4l doesn't add it.
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR, 1),
 #endif
-    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING, 0),
-    ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER, 0),
-    ENCODER_CTL(0, 0)
-  };
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING, 0),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER, 0),
+      ENCODER_CTL(0, 0)};
 
   while ((c = getopt_long(argc, argv, "f:i:o:w:h:m:r:b:g:c:e:q:l:", longopts,
                           NULL)) != -1) {
@@ -974,16 +968,13 @@ int main(int argc, char* argv[]) {
         framerate = atoi(optarg);
         break;
       case 'b':
-        set_control_value(common_control_list,
-                          V4L2_CID_MPEG_VIDEO_BITRATE,
+        set_control_value(common_control_list, V4L2_CID_MPEG_VIDEO_BITRATE,
                           atoi(optarg));
-        set_control_value(common_control_list,
-                          V4L2_CID_MPEG_VIDEO_BITRATE_PEAK,
+        set_control_value(common_control_list, V4L2_CID_MPEG_VIDEO_BITRATE_PEAK,
                           atoi(optarg) * 2);
         break;
       case 'g':
-        set_control_value(common_control_list,
-                          V4L2_CID_MPEG_VIDEO_GOP_SIZE,
+        set_control_value(common_control_list, V4L2_CID_MPEG_VIDEO_GOP_SIZE,
                           atoi(optarg));
         break;
       case 'c':
@@ -1010,8 +1001,7 @@ int main(int argc, char* argv[]) {
         break;
       case 'l':
         set_control_value(h264_control_list,
-                          V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING,
-                          1);
+                          V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING, 1);
         set_control_value(h264_control_list,
                           V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER,
                           atoi(optarg));
@@ -1020,18 +1010,18 @@ int main(int argc, char* argv[]) {
     }
   }
 
-  const int bitrate_mode = get_control_value(common_control_list,
-                                             V4L2_CID_MPEG_VIDEO_BITRATE_MODE);
-  fprintf(
-      stderr, "encoding %d frames using %s bitrate control\n", frames_to_encode,
-      (bitrate_mode == V4L2_MPEG_VIDEO_BITRATE_MODE_CBR) ? "CBR" : "VBR");
+  const int bitrate_mode =
+      get_control_value(common_control_list, V4L2_CID_MPEG_VIDEO_BITRATE_MODE);
+  fprintf(stderr, "encoding %d frames using %s bitrate control\n",
+          frames_to_encode,
+          (bitrate_mode == V4L2_MPEG_VIDEO_BITRATE_MODE_CBR) ? "CBR" : "VBR");
 
   int v4lfd = -1;
   const size_t kEncodeDeviceFilesSize =
       sizeof(kEncodeDeviceFiles) / sizeof(char*);
   for (int index = 0; index < kEncodeDeviceFilesSize; ++index) {
     int temp_fd =
-      open(kEncodeDeviceFiles[index], O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        open(kEncodeDeviceFiles[index], O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (temp_fd < 0)
       continue;
 #if defined(USE_V4LPLUGIN)
@@ -1048,7 +1038,7 @@ int main(int argc, char* argv[]) {
 
   if (v4lfd < 0) {
     fprintf(stderr,
-        "Did not find a device file with the needed capabilities\n");
+            "Did not find a device file with the needed capabilities\n");
     exit(EXIT_FAILURE);
   }
 
@@ -1075,8 +1065,7 @@ int main(int argc, char* argv[]) {
   }
 
   uint8_t* frame_buffer = malloc(frame_size);
-  struct file_buffer fb = {.buffer = frame_buffer,
-                           .frame_size = frame_size};
+  struct file_buffer fb = {.buffer = frame_buffer, .frame_size = frame_size};
 
   fprintf(stderr, "encoding %d frames using %s bitrate control\n",
           frames_to_encode,
@@ -1112,8 +1101,8 @@ int main(int argc, char* argv[]) {
   }
 
   if (!ret) {
-    ret = encode(&fb, &fi, output_file_name, &OUTPUT_queue,
-                 &CAPTURE_queue, frames_to_encode);
+    ret = encode(&fb, &fi, output_file_name, &OUTPUT_queue, &CAPTURE_queue,
+                 frames_to_encode);
   }
 
   cleanup_queue(&OUTPUT_queue);
