@@ -27,6 +27,8 @@
 #include <libv4l2.h>
 #endif
 
+#define MAX_HIERARCHICAL_LAYERS 6
+
 // TODO(mcasas): Consider trying all /dev/video-enc* device files if a platform
 // has more than two.
 static const char* kEncodeDeviceFiles[] = {"/dev/video-enc0",
@@ -872,21 +874,23 @@ int encode(const struct file_buffer* fb,
 
 static void print_help(const char* argv0) {
   printf("usage: %s [OPTIONS]\n", argv0);
-  printf("  -f, --file        file to encode\n");
-  printf("  -i, --file_format pixel format of the file (yv12, nv12)\n");
+  printf("  -f, --file         file to encode\n");
+  printf("  -i, --file_format  pixel format of the file (yv12, nv12)\n");
   printf(
-      "  -o, --output      output file name (will get a .h264 or .ivf suffix "
+      "  -o, --output       output file name (will get a .h264 or .ivf suffix "
       "added)\n");
-  printf("  -w, --width       width of image\n");
-  printf("  -h, --height      height of image\n");
-  printf("  -m, --max         max number of frames to decode\n");
-  printf("  -r, --rate        frames per second\n");
-  printf("  -b, --bitrate     bits per second\n");
-  printf("  -g, --gop         gop length\n");
-  printf("  -c, --codec       codec\n");
-  printf("  -e, --end_usage   rate control mode: VBR (default), CBR\n");
-  printf("  -q, --buffer_fmt  OUTPUT queue format\n");
-  printf("  -l, --hier        hierarchical p frame distance\n");
+  printf("  -w, --width        width of image\n");
+  printf("  -h, --height       height of image\n");
+  printf("  -m, --max          max number of frames to decode\n");
+  printf("  -r, --rate         frames per second\n");
+  printf("  -b, --bitrate      bits per second\n");
+  printf("  -g, --gop          gop length\n");
+  printf("  -c, --codec        codec\n");
+  printf("  -e, --end_usage    rate control mode: VBR (default), CBR\n");
+  printf("  -q, --buffer_fmt   OUTPUT queue format\n");
+  printf(
+      "  -n, --hier_bitrate string of hierarchical layer bitrates, space "
+      "or comma separated\n");
 }
 
 static const struct option longopts[] = {
@@ -902,7 +906,7 @@ static const struct option longopts[] = {
     {"codec", required_argument, NULL, 'c'},
     {"end_usage", required_argument, NULL, 'e'},
     {"buffer_fmt", required_argument, NULL, 'q'},
-    {"hier", required_argument, NULL, 'l'},
+    {"hier_bitrate", required_argument, NULL, 'n'},
     {0, 0, 0, 0},
 };
 
@@ -942,9 +946,14 @@ int main(int argc, char* argv[]) {
 #endif
       ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING),
       ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER),
-      ENCODER_CTL(0)};
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L0_BR),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L1_BR),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L2_BR),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L3_BR),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L4_BR),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L5_BR), ENCODER_CTL(0)};
 
-  while ((c = getopt_long(argc, argv, "f:i:o:w:h:m:r:b:g:c:e:q:l:", longopts,
+  while ((c = getopt_long(argc, argv, "f:i:o:w:h:m:r:b:g:c:e:q:n:", longopts,
                           NULL)) != -1) {
     switch (c) {
       case 'f':
@@ -1004,12 +1013,44 @@ int main(int argc, char* argv[]) {
           printf("using (%s) as the OUTPUT_queue buffer format\n", optarg);
         }
         break;
-      case 'l':
+      case 'n': {
+        char* pch = strtok(optarg, " ,");
+        uint32_t layers = 0;
+        while (pch != NULL) {
+          const uint32_t layer_bitrate = atoi(pch);
+
+          if (MAX_HIERARCHICAL_LAYERS == layers) {
+            fprintf(stderr, "Too many layer bitrates provided. %d supported.\n",
+                    MAX_HIERARCHICAL_LAYERS);
+            exit(1);
+          }
+
+          assert(V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L1_BR ==
+                 (V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L0_BR + 1));
+          assert(V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L2_BR ==
+                 (V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L0_BR + 2));
+          assert(V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L3_BR ==
+                 (V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L0_BR + 3));
+          assert(V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L4_BR ==
+                 (V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L0_BR + 4));
+          assert(V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L5_BR ==
+                 (V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L0_BR + 5));
+
+          printf("setting layer %d bitrate to %d bps\n", layers, layer_bitrate);
+          set_control_value(h264_control_list,
+                            V4L2_CID_MPEG_VIDEO_H264_HIER_CODING_L0_BR + layers,
+                            layer_bitrate);
+          pch = strtok(NULL, " ,");
+
+          ++layers;
+        }
+
         set_control_value(h264_control_list,
                           V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING, 1);
         set_control_value(h264_control_list,
                           V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER,
-                          atoi(optarg));
+                          layers);
+      } break;
       default:
         break;
     }
