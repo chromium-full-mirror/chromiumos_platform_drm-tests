@@ -82,8 +82,11 @@ struct encoder_control {
   char* name;
 };
 
-#define ENCODER_CTL(ID, VALUE) \
+#define ENCODER_CTL_DEFAULT(ID, VALUE) \
   { .id = ID, .value = VALUE, .enabled = 1, .name = #ID }
+
+#define ENCODER_CTL(ID) \
+  { .id = ID, .value = 0, .enabled = 0, .name = #ID }
 
 struct ivf_file_header {
   uint32_t signature;
@@ -560,20 +563,21 @@ int Initialization(struct queue* OUTPUT_queue, struct queue* CAPTURE_queue) {
 void disable_unsupported_controls(int v4lfd,
                                   struct encoder_control* encoder_ctrl) {
   while (encoder_ctrl->id != 0) {
-    struct v4l2_query_ext_ctrl query_ext_ctrl;
-    memset(&query_ext_ctrl, 0, sizeof(query_ext_ctrl));
+    if (encoder_ctrl->enabled) {
+      struct v4l2_query_ext_ctrl query_ext_ctrl;
+      memset(&query_ext_ctrl, 0, sizeof(query_ext_ctrl));
 
-    query_ext_ctrl.id = V4L2_CTRL_CLASS_MPEG | encoder_ctrl->id;
+      query_ext_ctrl.id = V4L2_CTRL_CLASS_MPEG | encoder_ctrl->id;
 
-    int ret = do_ioctl(v4lfd, VIDIOC_QUERY_EXT_CTRL, &query_ext_ctrl);
+      int ret = do_ioctl(v4lfd, VIDIOC_QUERY_EXT_CTRL, &query_ext_ctrl);
 
-    encoder_ctrl->enabled = (ret == 0);
+      encoder_ctrl->enabled = (ret == 0);
 
-    if (ret != 0) {
-      fprintf(stderr, "%s control does not exist on this platform\n",
-              encoder_ctrl->name);
+      if (ret != 0) {
+        fprintf(stderr, "%s control does not exist on this platform\n",
+                encoder_ctrl->name);
+      }
     }
-
     encoder_ctrl++;
   };
 }
@@ -593,6 +597,7 @@ void set_control_value(struct encoder_control* encoder_ctrl,
   for (; encoder_ctrl && encoder_ctrl->id != 0; ++encoder_ctrl) {
     if (encoder_ctrl->id == id) {
       encoder_ctrl->value = value;
+      encoder_ctrl->enabled = 1;
       break;
     }
   }
@@ -914,30 +919,30 @@ int main(int argc, char* argv[]) {
   int c;
 
   struct encoder_control common_control_list[] = {
-      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_BITRATE, 1000),
-      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_GOP_SIZE, 20),
-      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE, 1),
-      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
-                  V4L2_MPEG_VIDEO_BITRATE_MODE_VBR),
-      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, 1500),
-      ENCODER_CTL(0, 0)};
+      ENCODER_CTL_DEFAULT(V4L2_CID_MPEG_VIDEO_BITRATE, 1000),
+      ENCODER_CTL_DEFAULT(V4L2_CID_MPEG_VIDEO_GOP_SIZE, 20),
+      ENCODER_CTL_DEFAULT(V4L2_CID_MPEG_VIDEO_FRAME_RC_ENABLE, 1),
+      ENCODER_CTL_DEFAULT(V4L2_CID_MPEG_VIDEO_BITRATE_MODE,
+                          V4L2_MPEG_VIDEO_BITRATE_MODE_VBR),
+      ENCODER_CTL_DEFAULT(V4L2_CID_MPEG_VIDEO_BITRATE_PEAK, 1500),
+      ENCODER_CTL_DEFAULT(0, 0)};
 
   struct encoder_control h264_control_list[] = {
-      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_PROFILE,
-                  V4L2_MPEG_VIDEO_H264_PROFILE_MAIN),
-      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_LEVEL,
-                  V4L2_MPEG_VIDEO_H264_LEVEL_4_0),
-      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE,
-                  V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC),
-      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_HEADER_MODE,
-                  V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME),
+      ENCODER_CTL_DEFAULT(V4L2_CID_MPEG_VIDEO_H264_PROFILE,
+                          V4L2_MPEG_VIDEO_H264_PROFILE_MAIN),
+      ENCODER_CTL_DEFAULT(V4L2_CID_MPEG_VIDEO_H264_LEVEL,
+                          V4L2_MPEG_VIDEO_H264_LEVEL_4_0),
+      ENCODER_CTL_DEFAULT(V4L2_CID_MPEG_VIDEO_H264_ENTROPY_MODE,
+                          V4L2_MPEG_VIDEO_H264_ENTROPY_MODE_CABAC),
+      ENCODER_CTL_DEFAULT(V4L2_CID_MPEG_VIDEO_HEADER_MODE,
+                          V4L2_MPEG_VIDEO_HEADER_MODE_JOINED_WITH_1ST_FRAME),
 #if defined(USE_V4LPLUGIN)
       // We need to explicitly request SPSPPS otherwise libv4l doesn't add it.
-      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR, 1),
+      ENCODER_CTL_DEFAULT(V4L2_CID_MPEG_VIDEO_PREPEND_SPSPPS_TO_IDR, 1),
 #endif
-      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING, 0),
-      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER, 0),
-      ENCODER_CTL(0, 0)};
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING),
+      ENCODER_CTL(V4L2_CID_MPEG_VIDEO_H264_HIERARCHICAL_CODING_LAYER),
+      ENCODER_CTL(0)};
 
   while ((c = getopt_long(argc, argv, "f:i:o:w:h:m:r:b:g:c:e:q:l:", longopts,
                           NULL)) != -1) {
