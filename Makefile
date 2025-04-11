@@ -7,6 +7,9 @@ OUT ?= $(PWD)/build-opt-local
 
 include common.mk
 
+# TODO: Re-enable these warnings.
+CFLAGS += -Wno-implicit-fallthrough -Wno-unreachable-code
+
 PC_DEPS = libdrm egl gbm
 PC_CFLAGS := $(shell $(PKG_CONFIG) --cflags $(PC_DEPS))
 PC_LIBS := $(shell $(PKG_CONFIG) --libs $(PC_DEPS))
