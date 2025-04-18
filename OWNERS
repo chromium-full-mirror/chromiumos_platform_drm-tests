@@ -15,3 +15,6 @@ seanpaul@chromium.org
 
 per-file v4l2*=frkoenig@chromium.org
 per-file v4l2*=nhebert@chromium.org
+
+# Robots.
+per-file common.mk = file:chromiumos/owners:v1:/bots/OWNERS.copybara
