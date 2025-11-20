@@ -476,6 +476,9 @@ void initialize_mali_perf_reader() {
   } else {
     assert(version_check.major >= SUPPORTED_MAJOR_VERSION);
     assert(version_check.minor >= SUPPORTED_MINOR_VERSION);
+    // Starting with 11.40 old HWCNT_READER IOCTL has been removed
+    if (version_check.minor >= MINOR_VERSION_NEW_COUNTERS)
+      init_func = initialize_prfcnt_reader;
   }
 
   struct kbase_ioctl_set_flags init_flags;

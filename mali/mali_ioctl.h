@@ -200,6 +200,7 @@ struct __attribute__((packed)) prfcnt_sample_access {
   _IOW(KBASE_KINSTR_PRFCNT_READER, 0x10, struct prfcnt_sample_access)
 
 #define SUPPORTED_MAJOR_VERSION 11
+#define MINOR_VERSION_NEW_COUNTERS 40
 #define SUPPORTED_MAJOR_VERSION_CSF 1
 #define SUPPORTED_MINOR_VERSION 11
 #define SUPPORTED_API_VERSION 1
